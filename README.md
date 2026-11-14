@@ -1139,7 +1139,7 @@ export OPENCODE_API_KEY=<你的 key>
 go test -tags e2e -timeout 600s -v ./e2e/
 ```
 
-覆盖：文本补全、bash 工具调用闭环、文件工具读写改往返、会话持久化与恢复、上下文压缩后信息保真、推理流透传且不污染转录、工具失败后的恢复、上下文超时中止、进程扩展工具、进程扩展否决工具调用（`event.consult` 反向通道）、MCP 工具、MCP resources、会话分叉与分支、权限拦截与放行、遥测落盘、OTLP 投递、Prometheus remote write 投递、工具渲染器接管呈现、`!` 快捷（含 `!!` 不进上下文）、文件变更队列串行化、Prompt 模板参数替换、项目上下文文件（AGENTS.md / SYSTEM.md）、Skills（渐进披露、模型自己读 SKILL.md、`/skill:name` 显式调用、参数传递、`disable-model-invocation` 隐藏、skill 不能自己执行命令）、RPC 模式（子进程协议：prompt 出答案、状态与历史、bash 命令与退出码、未知命令不毁会话、skill 走 RPC 也生效、关掉 stdin 后仍等运行结束）、JSON 输出模式（会话头在前、事件流完整、增量拼出答案、工具调用与结果在流上、非法模式值报错）。
+覆盖：文本补全、bash 工具调用闭环、文件工具读写改往返、会话持久化与恢复、上下文压缩后信息保真、推理流透传且不污染转录、工具失败后的恢复、上下文超时中止、进程扩展工具、进程扩展否决工具调用（`event.consult` 反向通道：否决、答不上来拦下、没声明就不问）、MCP 工具、MCP resources、会话分叉与分支、权限拦截与放行、遥测落盘、OTLP 投递、Prometheus remote write 投递、工具渲染器接管呈现、`!` 快捷（含 `!!` 不进上下文）、文件变更队列串行化、Prompt 模板参数替换、项目上下文文件（AGENTS.md / SYSTEM.md）、Skills（渐进披露、模型自己读 SKILL.md、`/skill:name` 显式调用、参数传递、`disable-model-invocation` 隐藏、skill 不能自己执行命令）、RPC 模式（子进程协议：prompt 出答案、状态与历史、bash 命令与退出码、未知命令不毁会话、skill 走 RPC 也生效、关掉 stdin 后仍等运行结束）、JSON 输出模式（会话头在前、事件流完整、增量拼出答案、工具调用与结果在流上、非法模式值报错）。
 
 未设置 key 时这些测试自动跳过（`t.Skip`），所以 CI 上安全。
 
