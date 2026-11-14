@@ -22,7 +22,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
-const version = "0.1.4"
+const version = "0.1.5"
 
 func main() {
 	var (
