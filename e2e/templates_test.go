@@ -156,10 +156,17 @@ func TestLiveContextFileReachesTheModel(t *testing.T) {
 
 // TestLiveSystemFileReplacesThePrompt verifies that the system file
 // replaces the prompt outright.
+//
+// The system file is the whole system prompt here, so the model has
+// nothing but this instruction to go on. The instruction says so
+// explicitly: a bare "reply with X" leaves the model free to look
+// around the working directory first, and then it answers with
+// whatever it found instead of the marker.
 func TestLiveSystemFileReplacesThePrompt(t *testing.T) {
 	dir := t.TempDir()
 	system := filepath.Join(dir, projcontext.SystemFile)
-	content := "Reply with exactly: SYSTEM_FILE_USED and nothing else."
+	content := "You are a test fixture. Do not use any tools. " +
+		"Reply to the user's message with exactly: SYSTEM_FILE_USED and nothing else."
 	if err := os.WriteFile(system, []byte(content), 0o644); err != nil {
 		t.Fatalf("write the system file: %v", err)
 	}
