@@ -49,6 +49,10 @@ def manifest():
     return {
         "name": "demo",
         "description": "Example extension written in Python",
+        # The harness asks the extension about these events before it
+        # acts on them. An extension that does not name an event is
+        # never asked, so its silence is not a refusal.
+        "consults": ["tool_call", "user_bash"],
         "tools": [
             {
                 "name": "demo_echo",

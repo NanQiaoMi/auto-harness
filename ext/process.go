@@ -20,7 +20,7 @@ const handshakeTimeout = 10 * time.Second
 //
 // It is short on purpose: the answer decides whether a tool call runs
 // now, and a model is waiting. An extension that is slow to answer is
-// treated as one that does not object.
+// treated as one that cannot vouch for the operation.
 const consultTimeout = 5 * time.Second
 
 // ProcessExtension runs an external extension process and bridges it into
@@ -151,13 +151,26 @@ func (e *ProcessExtension) Setup(api *API) error {
 // consult asks the extension about an event and applies its answer.
 //
 // The question goes out as a request, so the extension can answer
-// before the call runs. An extension that does not answer, or answers
-// with an error, lets the call through: a broken extension must not
-// freeze the harness, and blocking everything would be worse than
-// letting one call by.
+// before the call runs.
+//
+// The policy is fail-closed, and it is the same one pi documents for
+// its own gate handlers: an extension that cannot make a safety
+// decision has not made one, so the operation does not happen. An
+// extension that does not answer, answers with an error, or times out
+// blocks the operation. A broken policy extension must not become an
+// open door.
+//
+// Two things keep this from being as sharp as pi's. The wait is
+// bounded (pi's in-process handler can hang the harness indefinitely),
+// and the extension must have opted in: an extension whose manifest
+// does not name the event is never asked about it, so a policy
+// extension that predates this channel is not treated as failing.
 func (e *ProcessExtension) consult(ev *Event) {
 	conn := e.connection()
 	if conn == nil {
+		return
+	}
+	if !e.consults(ev.Type) {
 		return
 	}
 	params := ConsultParams{
@@ -177,6 +190,9 @@ func (e *ProcessExtension) consult(ev *Event) {
 	}
 	var out ConsultResult
 	if err := conn.callTimeout(MethodConsult, params, &out, consultTimeout); err != nil {
+		// The extension could not vouch for the operation, so the
+		// operation does not happen.
+		e.refuse(ev, "the policy extension did not answer: "+err.Error())
 		return
 	}
 	if out.Cancel {
@@ -185,7 +201,32 @@ func (e *ProcessExtension) consult(ev *Event) {
 	if !out.Block {
 		return
 	}
-	reason := out.Reason
+	e.refuse(ev, out.Reason)
+}
+
+// consults reports whether the extension asked to be consulted about
+// the given event.
+func (e *ProcessExtension) consults(t EventType) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, name := range e.manifest.Consults {
+		if name == string(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// refuse stops the operation the event guards.
+//
+// The two veto mechanisms are not the same: a tool call and a shell
+// command are blocked (the reason is reported back to the model), while
+// a compaction is cancelled (there is no model waiting for a reason).
+func (e *ProcessExtension) refuse(ev *Event, reason string) {
+	if ev.Type == EventSessionBeforeCompact {
+		ev.Cancel = true
+		return
+	}
 	if reason == "" {
 		reason = "blocked by an extension"
 	}

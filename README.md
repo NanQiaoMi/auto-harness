@@ -111,6 +111,82 @@ config/               配置：默认值 < ~/.harness/config.json < 环境变量
 | `pi-coding-agent` RPC 模式 | `rpc`                       | JSONL 命令/响应/事件，被别的程序驱动 |
 | `pi-coding-agent` JSON 模式 | `jsonout`                  | 一次性运行的完整事件流（--mode json） |
 
+### 与 pi 的设计差异
+
+模块对应关系说"哪里像"，这一节说"哪里不一样"——每一条都是刻意的选择，不是漏做。
+
+**1. 裁决是改字段，不是返回值。** pi 的 handler **返回**裁决：`return { block: true,
+reason: "..." }`，`terminate` 还能让 agent 提前收工；`session_before_*` 则返回
+`{ cancel: true }`。auto-harness 的 handler **改事件**：`e.Block` / `e.BlockReason` /
+`e.Cancel`。区别在于 pi 的返回值天然是「短路」的——一个 handler 回了 `block`，后面的
+handler 根本不跑（`if (result.block) return result`）；auto-harness 的事件总线是广播，
+所有 handler 都会跑，改字段的结果按顺序叠加。代价是 auto-harness 少一个 `terminate`
+语义（工具批次提前收工），换来的是 Go 里不用为每个事件定义一套结果类型——一个
+`Event` 结构体带 `Block` / `Cancel` / `Continue` 三个裁决字段，够所有事件用。
+
+**2. 进程扩展是 auto-harness 独有的。** pi 的扩展只能是 TypeScript——`pi.on(...)` 是
+一个函数调用，扩展进程活在 harness 进程里，共享内存，没有跨进程这回事。auto-harness
+多了一层：扩展可以是**独立子进程**，任何语言写，走 stdio 上的 JSON-RPC。这让扩展能
+用 Python 写、能在容器里跑、能崩了不影响 harness。
+
+**3. 反向通道（`event.consult`）是两边都要解决的问题，但解法不同。** 进程内扩展和
+pi 一样，改字段就行；**跨进程就没法改字段了**——harness 得把事件送出去、等回答、
+再把裁决拿回来。这条通道在 pi 里不存在（因为不需要），在 auto-harness 里是必需的。
+
+具体做法是问一次、答一次（request/response），不是订阅：harness 把要问的事件发过去，
+扩展答 `{"block":true,"reason":"..."}`。
+
+| | pi（进程内扩展） | auto-harness（进程扩展） |
+|---|---|---|
+| 提问方式 | handler 直接收事件对象 | JSON-RPC 请求 `event.consult` |
+| 裁决载体 | 返回值 `{block, reason, terminate}` | 回答体 `{block, reason}` / `{cancel}` |
+| 谁被问 | 所有注册了这个事件的扩展 | manifest 里声明了 `consults` 的扩展 |
+| 答不上来 | 抛异常 → **拦下**（fail-closed） | 不回答/报错/超时 → **拦下**（fail-closed） |
+| 扩展卡住 | 挂住整个 harness | 5 秒超时，拦下 |
+
+失败策略两边一致，都是 **fail-closed**：pi 文档原话是 "gate handlers should fail closed
+when their safety decision cannot be made"，`tool_call` 出错就拦工具，`user_bash` 出错
+就拦命令。auto-harness 沿用这个策略，但多了两层保障——**等待有上限**（pi 的进程内
+handler 卡住会把 harness 一起卡住，这里 5 秒就放手）和**没声明就不问**（扩展要在
+manifest 里写 `"consults": ["tool_call"]` 才会被问到；没声明的扩展它的沉默不是拒绝，
+不然通道出现之前写的扩展会把每一次工具调用都弄挂）。
+
+**4. 被否决的调用不再问用户。** pi 的 `tool_call` 和权限层是两条独立的路，扩展否决
+之后权限层照样问用户。auto-harness 让权限层看到 `e.Block` 就跳过——用户不会为一
+个根本不会执行的调用做决定。
+
+**5. pi 的 `user_bash` 是"接管"，auto-harness 是"否决"。** pi 的 `user_bash` handler
+返回 `{ operations }`（换执行后端，比如走 SSH）或 `{ result }`（整个替换执行结果），
+**没有单独的 block 标志**——想拒绝执行，扩展得自己返回一个 `result`（比如
+`{ output: "denied", exitCode: 1 }`）。auto-harness 的 `user_bash` 直接有
+`e.Block` / `e.BlockReason`，拒绝是一条命令的事，不用伪造执行结果。
+
+**6. 没做的：pi 的另外三个可取消事件。** pi 有 `session_before_switch` /
+`session_before_fork` / `session_before_tree`，都返回 `{ cancel: true }` 取消切换/
+分叉/树导航。auto-harness 只做了 `session_before_compact` 一个——另外三个需要会话
+树支持取消语义（切换被拒之后 UI 怎么办、分叉到一半失败了怎么收拾），不是加个字段
+的事，留着。
+
+**7. 事件集：auto-harness 多的一个，pi 多的是二十一个。** auto-harness 有 pi 没有的
+`request_start`（一次模型请求的事实：provider / model / 工具数，用来测量单次请求而
+不改 provider）。pi 多出来的 21 个大致分四类：**会话切换审批**
+（`session_before_switch` / `session_before_fork` / `session_before_tree` /
+`project_trust`）、**provider 挂钩**（`before_provider_headers` /
+`before_provider_request` / `after_provider_response` / `provider_stream_event`）、
+**UI 与选择**（`ui_prompt_start` / `ui_prompt_end` / `model_select` /
+`thinking_level_select` / `cache_warming_decision`）、**生命周期补集**
+（`agent_settled` / `agent_before_settle` / `session_compact_failed` / `session_tree` /
+`session_info_changed` / `context_with_system` / `mcp_servers_change` /
+`resources_discover`）。
+
+auto-harness 的 provider 挂钩不在事件总线上，而在 `llm.Hooks`（`BeforeHeaders` /
+`BeforeRequest` / `AfterResponse`）——它们服务的是 HTTP 层（改头、改请求体、读响应），
+事件总线上那份是给扩展看的生命周期，混在一起反而两种都难用。
+
+**8. `input` 事件声明了但没发。** `ext.EventInput` 在事件表里，注释写着"改写/接管
+输入"，但实际上没有任何地方发它——REPL 的输入路径没走事件总线。这是个已知缺口，
+不是设计选择。
+
 ## 快速开始
 
 ```bash
@@ -374,11 +450,21 @@ harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_cal
 拿到的是工具本身会看到的原始参数。回答是 `{"block":true,"reason":"..."}`；
 `session_before_compact` 也可以答 `{"cancel":true}`。
 
+扩展要在 manifest 里声明它想被问到哪些事件：
+
+```json
+{"name": "policy", "consults": ["tool_call", "user_bash"]}
+```
+
 两个细节：
 
-- **不回答就放行。** 扩展不回答、报错或者超时（5 秒），harness 照常执行——一个坏
-  扩展不能把整个会话冻住，比漏放一次调用坏得多。
-- **顺序不打扰人。** 已经被扩展否决的调用不会再走到权限层去问用户。
+- **答不上来就拦下。** 扩展不回答、报错或者超时（5 秒），这次操作**不执行**——
+  和 pi 的 gate handler 一样（pi 文档原话是 "gate handlers should fail closed when
+  their safety decision cannot be made"，`tool_call` 出错就拦工具，`user_bash` 出错就
+  拦命令）。一个坏掉的策略扩展不能变成一扇开着的门。这里比 pi 多一层保障：pi 的
+  进程内 handler 卡住会把 harness 一起卡住，这里有 5 秒上限。
+- **没声明就不问。** manifest 里没写 `consults` 的扩展根本不会被问到，所以它的沉默
+  不是拒绝——不然通道出现之前写的扩展会把每一次工具调用都弄挂。
 
 进程内扩展（Go 写的）用同一个事件总线，`e.Block` / `e.BlockReason` 直接就位；
 子进程扩展则多走一次 JSON-RPC。
@@ -1083,7 +1169,7 @@ go test -tags e2e -timeout 600s -v ./e2e/
 - **MCP 工具接入**（[mcp/](mcp/)）：Model Context Protocol 客户端——stdio 子进程与 streamable HTTP 两种传输、`initialize` 握手与能力协商、`tools/list` 分页发现、`tools/call` 调用、工具以 `mcp__<server>__<tool>` 命名桥接进 `tools.Registry`；`mcp.json` 配置读取与用户级/项目级合并、`-mcp-list` 与 `/mcp` 命令；一个 server 失败不影响其他
 - **会话树与分叉**（[session/tree.go](session/tree.go)、[session/fork.go](session/fork.go)）：会话文件升级为树格式（entry 带 `id`/`parentId`），`/tree` 列出并切换分支（模型上下文随分支切换），`/fork` 从指定用户消息分叉出独立会话文件、`/clone` 复制当前分支；当前位置（`leaf_pointer`）持久化，重载会话能回到正在走的分支；压缩写成 `compaction` entry（摘要替代被压缩的消息，原文保留在文件里）；旧 v1 线性格式加载时自动迁移
 - **扩展动态加载与热重载**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)、[ext/scope.go](ext/scope.go)）：进程扩展协议（stdio 上的 JSON-RPC，扩展可用任何语言写）、manifest 握手、工具桥接、事件转发、扩展发现（`~/.harness/extensions`、项目目录、`config.json` 的 `extension_dirs`）；`/reload` 按 pi 语义重载（`session_shutdown` → 撤销注册 → 重新 `Setup` → `session_start`），注册项由 harness 自动记录并撤销，扩展只需实现 `ext.Teardown` 释放子进程等资源
-- **扩展的反向通道（`event.consult`）**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)）：扩展原来只能往 harness 推事件，没法否决 harness 要做的事——它能提供工具，却拦不住一次调用。补一条 host→extension 的请求通道：harness 在动手之前问一句「这件事允许吗」，扩展答 `{"block":true,"reason":"..."}` 就否决，问的是内核真正要做决定的三件事（`tool_call` / `user_bash` / `session_before_compact`）。两个取舍：**不回答就放行**（不回答、报错或超时 5 秒都照常执行——一个坏扩展冻住会话比漏放一次调用坏得多），**已被否决的调用不再去问用户**（权限层看到 `e.Block` 就跳过）。进程内扩展走同一个事件总线用 `e.Block`，子进程扩展多走一次 JSON-RPC，两边语义一致
+- **扩展的反向通道（`event.consult`）**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)）：扩展原来只能往 harness 推事件，没法否决 harness 要做的事——它能提供工具，却拦不住一次调用。补一条 host→extension 的请求通道：harness 在动手之前问一句「这件事允许吗」，扩展答 `{"block":true,"reason":"..."}` 就否决，问的是内核真正要做决定的三件事（`tool_call` / `user_bash` / `session_before_compact`）。失败策略沿用 pi 的 **fail-closed**（"gate handlers should fail closed when their safety decision cannot be made"）——答不上来就拦下，坏掉的策略扩展不能变成一扇开着的门；比 pi 多两层保障：**等待有上限**（pi 的进程内 handler 卡住会挂住 harness，这里 5 秒放手）和**没声明就不问**（manifest 里写 `"consults": [...]` 才被问到，没声明的扩展它的沉默不算拒绝）。另外**已被否决的调用不再去问用户**（权限层看到 `e.Block` 就跳过）。进程内扩展走同一个事件总线用 `e.Block`，子进程扩展多走一次 JSON-RPC，两边语义一致
 - **TUI 差分渲染**（[tui/](tui/)）：帧差分只重写变化的行、CSI 2026 同步输出防闪烁、ANSI 感知的显示宽度（含 CJK 宽字符）、Component 体系（Text/Container/VStack/HStack/Transcript/Editor）、主屏与备用屏两种渲染器。`-tui` 启用；模型输出流式更新单行，编辑器行不抖动
 - **上下文压缩**：内置 LLM 摘要压缩器（`agent.NewSummarizer`），REPL `/compact` 直接可用；扩展仍可通过 `session_before_compact` 钩子接管（钩子优先）
 - **推理透传**：OpenAI 兼容流的 `reasoning_content`、Anthropic 流的 `thinking` 块都会作为 thinking 增量流向 UI（`-show-thinking` 显示），且不会污染转录内容。**同一个 chunk 同时带 reasoning 和正文时，两个都要出来**——早期实现遇到 reasoning 就直接 return，正文被整段吞掉，于是模型的回答缺了开头几个字（`HARNESS_SKILL_HIDDEN` 变成 `KILL_HIDDEN`）；现在多出来的事件进队列，下一次 `Recv` 取出来

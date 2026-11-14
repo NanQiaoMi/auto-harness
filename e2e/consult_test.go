@@ -109,7 +109,11 @@ def send(msg):
     sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
-MANIFEST = {"name": "veto", "description": "vetoes the guarded tool"}
+MANIFEST = {
+    "name": "veto",
+    "description": "vetoes the guarded tool",
+    "consults": ["tool_call"],
+}
 
 while True:
     try:

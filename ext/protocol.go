@@ -67,6 +67,16 @@ type Manifest struct {
 	Description string `json:"description,omitempty"`
 	// Tools lists the tools the extension provides.
 	Tools []ManifestTool `json:"tools,omitempty"`
+	// Consults lists the event types the extension wants to be
+	// consulted about.
+	//
+	// An extension that does not name an event is never asked about
+	// it. That matters because the harness fails closed: it blocks
+	// the operation when a consulted extension does not answer. An
+	// extension that never opted in is not "failing to answer" — it
+	// is simply not in the loop, so the harness must not treat its
+	// silence as a failure.
+	Consults []string `json:"consults,omitempty"`
 }
 
 // ManifestTool describes one tool offered by an extension process.
