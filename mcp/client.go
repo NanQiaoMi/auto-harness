@@ -119,7 +119,7 @@ func (c *Client) handshake(ctx context.Context) error {
 		ClientInfo: Implementation{
 			Name:    "auto-harness",
 			Title:   "auto-harness coding agent",
-			Version: "0.1.1",
+			Version: "0.1.2",
 		},
 	}, &result)
 	if err != nil {
