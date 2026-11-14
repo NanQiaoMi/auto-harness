@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/mcp"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/mcp"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // mcpSetup holds the MCP configuration and the connection manager.

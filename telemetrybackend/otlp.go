@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/mimi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
 )
 
 // The OTLP JSON payload types.

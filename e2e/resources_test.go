@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/mcp"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/mcp"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // writeLiveResourceServer writes an MCP server that offers one

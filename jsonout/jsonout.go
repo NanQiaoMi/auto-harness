@@ -23,9 +23,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/llm"
-	"github.com/mimi/auto-harness/session"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/session"
 )
 
 // The event types the stream carries.

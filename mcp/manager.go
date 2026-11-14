@@ -7,7 +7,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // Manager connects to the configured MCP servers and exposes their

@@ -21,7 +21,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mimi/auto-harness/frontmatter"
+	"github.com/NanQiaoMi/auto-harness/frontmatter"
 )
 
 // FileName is the file that holds a skill's instructions.

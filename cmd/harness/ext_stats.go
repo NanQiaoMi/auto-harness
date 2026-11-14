@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // exampleExtensions returns the extensions bundled with the harness

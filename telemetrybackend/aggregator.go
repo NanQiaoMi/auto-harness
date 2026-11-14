@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mimi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
 )
 
 // Aggregator turns raw measurements into the aggregate points a

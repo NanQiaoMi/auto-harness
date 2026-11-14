@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/perm"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/perm"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // TestLivePermissionDenied verifies the permission layer blocks a

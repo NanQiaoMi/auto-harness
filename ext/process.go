@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // handshakeTimeout bounds the manifest handshake with an extension

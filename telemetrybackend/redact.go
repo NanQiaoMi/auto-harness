@@ -1,7 +1,7 @@
 package telemetrybackend
 
 import (
-	"github.com/mimi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
 )
 
 // redactSpans drops the attributes the schema marks sensitive.

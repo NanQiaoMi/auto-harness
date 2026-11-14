@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mimi/auto-harness/rpc"
+	"github.com/NanQiaoMi/auto-harness/rpc"
 )
 
 // rpcProcess is the harness running in RPC mode.

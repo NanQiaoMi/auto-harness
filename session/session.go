@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mimi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/llm"
 )
 
 // DefaultDir is the per-user session store location.

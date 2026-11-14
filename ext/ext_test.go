@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 func TestBusHandlerOrderAndUnsubscribe(t *testing.T) {

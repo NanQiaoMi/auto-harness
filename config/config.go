@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/mimi/auto-harness/llm"
-	"github.com/mimi/auto-harness/mcp"
-	"github.com/mimi/auto-harness/perm"
+	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/mcp"
+	"github.com/NanQiaoMi/auto-harness/perm"
 )
 
 // Config is the effective harness configuration.

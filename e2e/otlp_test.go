@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/telemetry"
-	"github.com/mimi/auto-harness/telemetrybackend"
-	"github.com/mimi/auto-harness/telemetryext"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetrybackend"
+	"github.com/NanQiaoMi/auto-harness/telemetryext"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // otlpCollector is a stand-in for an OTLP collector: it records the

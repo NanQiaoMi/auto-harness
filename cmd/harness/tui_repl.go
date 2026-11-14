@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/perm"
-	"github.com/mimi/auto-harness/shellext"
-	"github.com/mimi/auto-harness/tui"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/perm"
+	"github.com/NanQiaoMi/auto-harness/shellext"
+	"github.com/NanQiaoMi/auto-harness/tui"
 )
 
 // runTUIREPL runs the interactive loop on the differential-rendering

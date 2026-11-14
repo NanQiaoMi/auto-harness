@@ -12,14 +12,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/llm"
-	"github.com/mimi/auto-harness/perm"
-	"github.com/mimi/auto-harness/session"
-	"github.com/mimi/auto-harness/shellext"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/perm"
+	"github.com/NanQiaoMi/auto-harness/session"
+	"github.com/NanQiaoMi/auto-harness/shellext"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 const version = "0.1.0"

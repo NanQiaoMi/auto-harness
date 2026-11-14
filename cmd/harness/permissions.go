@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/perm"
-	"github.com/mimi/auto-harness/sandbox"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/perm"
+	"github.com/NanQiaoMi/auto-harness/sandbox"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // permSetup holds the permission layer's state.

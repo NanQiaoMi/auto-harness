@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mimi/auto-harness/telemetry"
-	"github.com/mimi/auto-harness/telemetrybackend/prompb"
-	"github.com/mimi/auto-harness/telemetrybackend/snappy"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetrybackend/prompb"
+	"github.com/NanQiaoMi/auto-harness/telemetrybackend/snappy"
 )
 
 // The label Prometheus gives a metric its name.

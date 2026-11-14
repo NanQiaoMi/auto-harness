@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/skills"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/skills"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // writeSkillFile writes a skill file and returns its path.

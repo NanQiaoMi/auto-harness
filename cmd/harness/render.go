@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/llm"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // toolNotice renders a tool call and its result for display.

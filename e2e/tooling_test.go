@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/shellext"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/shellext"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // TestLiveToolRendererSeesTheCall verifies the renderer extension

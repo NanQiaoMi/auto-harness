@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mimi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
 )
 
 // OTLPBackend ships telemetry to an OpenTelemetry collector over HTTP.

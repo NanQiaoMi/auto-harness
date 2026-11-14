@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/projcontext"
-	"github.com/mimi/auto-harness/prompts"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/projcontext"
+	"github.com/NanQiaoMi/auto-harness/prompts"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // TestLivePromptTemplateFeedsTheModel verifies that a prompt template

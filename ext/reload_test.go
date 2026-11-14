@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // fakeExtension is an extension that records what it registered.

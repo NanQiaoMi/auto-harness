@@ -3,7 +3,7 @@ package ext
 import (
 	"sync"
 
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // scope records everything an extension registered during its Setup, so

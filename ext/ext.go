@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mimi/auto-harness/llm"
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // EventType identifies a hook. Names mirror pi's event names where the

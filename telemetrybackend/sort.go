@@ -3,7 +3,7 @@ package telemetrybackend
 import (
 	"sort"
 
-	"github.com/mimi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
 )
 
 // sortedKeys returns a map's keys in order.

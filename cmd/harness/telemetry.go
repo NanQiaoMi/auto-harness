@@ -5,11 +5,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/telemetry"
-	"github.com/mimi/auto-harness/telemetrybackend"
-	"github.com/mimi/auto-harness/telemetryext"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetrybackend"
+	"github.com/NanQiaoMi/auto-harness/telemetryext"
 )
 
 // telemetrySetup wires the telemetry collector into a run.

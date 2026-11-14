@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // pythonServer writes a small MCP server for the tests.

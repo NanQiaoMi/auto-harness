@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mimi/auto-harness/frontmatter"
+	"github.com/NanQiaoMi/auto-harness/frontmatter"
 )
 
 // Template is one prompt template.

@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/jsonout"
-	"github.com/mimi/auto-harness/session"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/jsonout"
+	"github.com/NanQiaoMi/auto-harness/session"
 )
 
 // runJSONMode runs the harness one-shot and writes the run as a JSON

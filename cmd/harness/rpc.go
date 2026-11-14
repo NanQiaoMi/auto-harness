@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/llm"
-	"github.com/mimi/auto-harness/rpc"
-	"github.com/mimi/auto-harness/session"
-	"github.com/mimi/auto-harness/shellext"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/rpc"
+	"github.com/NanQiaoMi/auto-harness/session"
+	"github.com/NanQiaoMi/auto-harness/shellext"
 )
 
 // runRPCMode runs the harness as a long-lived subprocess driven by

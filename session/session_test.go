@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/mimi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/llm"
 )
 
 func TestSessionAppendLoadRoundtrip(t *testing.T) {

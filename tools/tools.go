@@ -11,7 +11,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/mimi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/llm"
 )
 
 // Update is streamed progress from a long-running tool execution.

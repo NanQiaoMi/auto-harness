@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mimi/auto-harness/telemetry"
-	"github.com/mimi/auto-harness/telemetrybackend/prompb"
-	"github.com/mimi/auto-harness/telemetrybackend/snappy"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetrybackend/prompb"
+	"github.com/NanQiaoMi/auto-harness/telemetrybackend/snappy"
 )
 
 // fakePrometheus is a stand-in for a Prometheus server's remote write

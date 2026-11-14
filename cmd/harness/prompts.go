@@ -6,11 +6,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/projcontext"
-	"github.com/mimi/auto-harness/prompts"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/projcontext"
+	"github.com/NanQiaoMi/auto-harness/prompts"
 )
 
 // promptSetup wires the prompt templates and the project context files

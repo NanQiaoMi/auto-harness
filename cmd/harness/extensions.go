@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/ext"
 )
 
 // extensionLoader builds the extension list from the config: the

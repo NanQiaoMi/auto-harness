@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/mimi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/llm"
 )
 
 // ForkOptions controls how a session is forked.

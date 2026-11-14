@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mimi/auto-harness/tools"
+	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
 // TestRegisterToolRendererLetsAnExtensionTakeOver verifies the

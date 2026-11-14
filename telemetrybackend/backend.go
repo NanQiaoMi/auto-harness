@@ -25,7 +25,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/mimi/auto-harness/telemetry"
+	"github.com/NanQiaoMi/auto-harness/telemetry"
 )
 
 // Backend ships telemetry somewhere.
@@ -63,7 +63,7 @@ type Resource struct {
 // It becomes the OTLP instrumentation scope: the name of the package
 // and its version.
 type Scope struct {
-	// Name is the instrumentation scope name, e.g. "github.com/mimi/auto-harness".
+	// Name is the instrumentation scope name, e.g. "github.com/NanQiaoMi/auto-harness".
 	Name string
 	// Version is the instrumentation version.
 	Version string
@@ -151,7 +151,7 @@ func defaultResource() Resource {
 // defaultScope is the instrumentation scope of the harness.
 func defaultScope() Scope {
 	return Scope{
-		Name:    "github.com/mimi/auto-harness",
+		Name:    "github.com/NanQiaoMi/auto-harness",
 		Version: Version,
 	}
 }

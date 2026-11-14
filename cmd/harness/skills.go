@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mimi/auto-harness/agent"
-	"github.com/mimi/auto-harness/config"
-	"github.com/mimi/auto-harness/ext"
-	"github.com/mimi/auto-harness/skills"
+	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/skills"
 )
 
 // skillSetup wires the skills into a run.
