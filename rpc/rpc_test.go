@@ -565,6 +565,53 @@ func TestAbortStopsTheRun(t *testing.T) {
 	}
 }
 
+// TestClientKeepsTheRecordsItSkips checks that a client does not lose
+// a record it read ahead of the one it was looking for.
+//
+// The order between a response and the run's events is not fixed: the
+// settled event can arrive before the response that ended the run. A
+// client that throws away what it read early loses the settled event,
+// and then waits for a second copy that never comes — the abort test
+// hung that way under the race detector.
+//
+// The test drives the client with the records in the awkward order on
+// purpose, so it fails on the old client every time rather than once
+// in a while.
+func TestClientKeepsTheRecordsItSkips(t *testing.T) {
+	// The test never sends a command, so the pipe's reading end is
+	// closed right away: only the records matter here.
+	commandReader, commandWriter := io.Pipe()
+	commandReader.Close()
+	recordBuffer := newSyncBuffer()
+	c := &client{
+		t:      t,
+		writer: commandWriter,
+		source: recordBuffer,
+		lines:  make(chan string, 256),
+	}
+	go c.pump()
+	defer commandWriter.Close()
+
+	// The settled event comes first, and the response to the abort
+	// comes second.
+	recordBuffer.Write([]byte(`{"type":"agent_settled","data":{"aborted":true}}` + "\n"))
+	recordBuffer.Write([]byte(`{"type":"response","command":"abort","success":true}` + "\n"))
+
+	// The client looks for the response first: it has to skip past
+	// the settled event to find it.
+	abort := c.response(CmdAbort)
+	if abort["success"] != true {
+		t.Fatalf("the abort response is %v", abort)
+	}
+
+	// And the settled event it skipped is still there.
+	settled := c.settled()
+	data, _ := settled["data"].(map[string]any)
+	if data["aborted"] != true {
+		t.Errorf("the settled event is %v, want an aborted one", settled)
+	}
+}
+
 // blockingProvider never answers, so a run only ends when it is
 // aborted.
 type blockingProvider struct{}

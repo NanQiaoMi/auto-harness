@@ -22,11 +22,34 @@ import (
 // client does — by correlating responses and events, not by counting
 // records.
 type client struct {
-	t       *testing.T
-	writer  *io.PipeWriter
-	reader  *bufio.Reader
-	mu      sync.Mutex
+	t      *testing.T
+	writer *io.PipeWriter
+	// source is where the records come from.
+	source io.Reader
+	// lines carries the records as they are read.
+	//
+	// The reading happens in one goroutine, so a lookup that gives up
+	// does not leave a half-finished read behind to trip over the
+	// next one.
+	lines chan string
+	mu    sync.Mutex
+	// records holds every record read so far.
+	//
+	// The records are kept because the order between a response and
+	// the run's events is not fixed: the settled event can arrive
+	// before the response that ended the run. A client that throws
+	// away what it read early loses it, and then waits for a second
+	// copy that never comes.
 	records []map[string]any
+	// responses and settles are the cursors of the two kinds of
+	// lookup.
+	//
+	// They are separate because a lookup that does not match must
+	// not consume what another one is looking for: the settled event
+	// can arrive before the response that ended the run, and a client
+	// that read it early still has to find it later.
+	responses int
+	settles   int
 }
 
 // newClient starts a server over a pipe and returns a client for it.
@@ -45,10 +68,32 @@ func newClient(t *testing.T, server *Server) *client {
 		recordBuffer.close()
 	}()
 
-	return &client{
+	c := &client{
 		t:      t,
 		writer: commandWriter,
-		reader: bufio.NewReader(recordBuffer),
+		source: recordBuffer,
+		lines:  make(chan string, 256),
+	}
+	go c.pump()
+	return c
+}
+
+// pump moves the records from the pipe into the channel.
+//
+// It is the only reader: the pipe read blocks, so the lookups take
+// from the channel instead, and a lookup that gives up leaves the
+// reader alone rather than abandoning a read half way.
+func (c *client) pump() {
+	reader := bufio.NewReader(c.source)
+	for {
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			c.lines <- line
+		}
+		if err != nil {
+			close(c.lines)
+			return
+		}
 	}
 }
 
@@ -109,55 +154,79 @@ func (c *client) send(command any) {
 	}
 }
 
-// next reads the next record.
-func (c *client) next() map[string]any {
+// readOne waits for the next record.
+//
+// The wait has a deadline: a record that never comes must fail the
+// test rather than hang it. The reader goroutine keeps reading either
+// way, so giving up here does not disturb the next lookup.
+func (c *client) readOne(within time.Duration) map[string]any {
 	c.t.Helper()
-	line, err := c.reader.ReadString('\n')
-	if err != nil && line == "" {
-		c.t.Fatalf("read: %v", err)
+	for {
+		select {
+		case line, ok := <-c.lines:
+			if !ok {
+				c.t.Fatalf("the stream ended before the record arrived")
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var record map[string]any
+			if err := json.Unmarshal([]byte(line), &record); err != nil {
+				c.t.Fatalf("the record %q is not JSON: %v", line, err)
+			}
+			c.mu.Lock()
+			c.records = append(c.records, record)
+			c.mu.Unlock()
+			return record
+		case <-time.After(within):
+			c.t.Fatalf("no record arrived within %s", within)
+		}
 	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return c.next()
+}
+
+// take returns the first record that matches, reading more when the
+// ones already read do not match.
+//
+// The records that do not match are kept: they were read ahead of the
+// one being looked for, and a later lookup may well be the one they
+// are. That is the whole point — the order between a response and the
+// run's events is not fixed, so the settled event can arrive before
+// the response that ended the run.
+//
+// Each kind of lookup has its own cursor, so looking for a response
+// does not consume the settled event that a later lookup wants.
+func (c *client) take(cursor *int, matches func(map[string]any) bool) map[string]any {
+	c.t.Helper()
+	for {
+		c.mu.Lock()
+		for *cursor < len(c.records) {
+			record := c.records[*cursor]
+			*cursor++
+			if matches(record) {
+				c.mu.Unlock()
+				return record
+			}
+		}
+		c.mu.Unlock()
+		c.readOne(5 * time.Second)
 	}
-	var record map[string]any
-	if err := json.Unmarshal([]byte(line), &record); err != nil {
-		c.t.Fatalf("the record %q is not JSON: %v", line, err)
-	}
-	c.mu.Lock()
-	c.records = append(c.records, record)
-	c.mu.Unlock()
-	return record
 }
 
 // response reads records until the response to a command arrives.
 func (c *client) response(command string) map[string]any {
 	c.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		record := c.next()
-		if record["type"] == "response" && record["command"] == command {
-			return record
-		}
-		if time.Now().After(deadline) {
-			c.t.Fatalf("no response to %q arrived", command)
-		}
-	}
+	return c.take(&c.responses, func(r map[string]any) bool {
+		return r["type"] == "response" && r["command"] == command
+	})
 }
 
 // settled reads records until the run settles.
 func (c *client) settled() map[string]any {
 	c.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		record := c.next()
-		if record["type"] == EventAgentSettled {
-			return record
-		}
-		if time.Now().After(deadline) {
-			c.t.Fatalf("the run did not settle")
-		}
-	}
+	return c.take(&c.settles, func(r map[string]any) bool {
+		return r["type"] == EventAgentSettled
+	})
 }
 
 // promptAndWait sends a prompt and waits for the run to settle.

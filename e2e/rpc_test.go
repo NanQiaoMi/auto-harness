@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,18 @@ type rpcProcess struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	reader *bufio.Reader
+	mu     sync.Mutex
+	// records holds every record read so far, and the two cursors
+	// say how far the two kinds of lookup have looked.
+	//
+	// The records are kept because the order between a response and
+	// the run's events is not fixed: the settled event can arrive
+	// before the response that ended the run. A client that throws
+	// away what it read early loses it, and then waits for a second
+	// copy that never comes.
+	records   []map[string]any
+	responses int
+	settles   int
 }
 
 // startRPC starts the harness in RPC mode.
@@ -126,21 +139,74 @@ func (p *rpcProcess) send(command any) {
 }
 
 // next reads the next record.
+//
+// The record is kept, so a later lookup can still find it: the order
+// between a response and the run's events is not fixed.
+//
+// The wait has a deadline: a harness that goes quiet must fail the
+// test rather than hang it. The read runs in a goroutine of its own,
+// because a pipe read cannot be interrupted — the deadline is
+// enforced by giving up on the result.
 func (p *rpcProcess) next() map[string]any {
 	p.t.Helper()
-	line, err := p.reader.ReadString('\n')
-	if err != nil && line == "" {
-		p.t.Fatalf("read: %v", err)
+
+	type result struct {
+		line string
+		err  error
 	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return p.next()
+	results := make(chan result, 1)
+	go func() {
+		line, err := p.reader.ReadString('\n')
+		results <- result{line, err}
+	}()
+
+	select {
+	case r := <-results:
+		if r.err != nil && r.line == "" {
+			p.t.Fatalf("read: %v", r.err)
+		}
+		line := strings.TrimSpace(r.line)
+		if line == "" {
+			return p.next()
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			p.t.Fatalf("the record %q is not JSON: %v", line, err)
+		}
+		p.mu.Lock()
+		p.records = append(p.records, record)
+		p.mu.Unlock()
+		return record
+	case <-time.After(120 * time.Second):
+		p.t.Fatal("no record arrived within 120s")
+		return nil
 	}
-	var record map[string]any
-	if err := json.Unmarshal([]byte(line), &record); err != nil {
-		p.t.Fatalf("the record %q is not JSON: %v", line, err)
+}
+
+// take returns the first record that matches, reading more when the
+// ones already read do not match.
+//
+// The records that do not match are kept: they were read ahead of the
+// one being looked for, and a later lookup may well be the one they
+// are.
+//
+// Each kind of lookup has its own cursor, so looking for a response
+// does not consume the settled event that a later lookup wants.
+func (p *rpcProcess) take(cursor *int, matches func(map[string]any) bool) map[string]any {
+	p.t.Helper()
+	for {
+		p.mu.Lock()
+		for *cursor < len(p.records) {
+			record := p.records[*cursor]
+			*cursor++
+			if matches(record) {
+				p.mu.Unlock()
+				return record
+			}
+		}
+		p.mu.Unlock()
+		p.next()
 	}
-	return record
 }
 
 // response reads records until the response to a command arrives.
@@ -150,31 +216,17 @@ func (p *rpcProcess) next() map[string]any {
 // fixed.
 func (p *rpcProcess) response(command string) map[string]any {
 	p.t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		record := p.next()
-		if record["type"] == "response" && record["command"] == command {
-			return record
-		}
-		if time.Now().After(deadline) {
-			p.t.Fatalf("no response to %q arrived", record)
-		}
-	}
+	return p.take(&p.responses, func(r map[string]any) bool {
+		return r["type"] == "response" && r["command"] == command
+	})
 }
 
 // settled reads records until the run settles.
 func (p *rpcProcess) settled() map[string]any {
 	p.t.Helper()
-	deadline := time.Now().Add(120 * time.Second)
-	for {
-		record := p.next()
-		if record["type"] == rpc.EventAgentSettled {
-			return record
-		}
-		if time.Now().After(deadline) {
-			p.t.Fatalf("the run did not settle")
-		}
-	}
+	return p.take(&p.settles, func(r map[string]any) bool {
+		return r["type"] == rpc.EventAgentSettled
+	})
 }
 
 // answer reads records until the run settles and returns the last
@@ -191,6 +243,9 @@ func (p *rpcProcess) answer() string {
 
 // answerAndSettle reads records until the run settles and returns the
 // last assistant message along with the settled event.
+//
+// It looks for the settled event with the settled cursor, so a later
+// settled() call does not find the event already taken.
 func (p *rpcProcess) answerAndSettle() (string, map[string]any) {
 	p.t.Helper()
 	deadline := time.Now().Add(120 * time.Second)
@@ -205,6 +260,9 @@ func (p *rpcProcess) answerAndSettle() (string, map[string]any) {
 				answer = content
 			}
 		case rpc.EventAgentSettled:
+			p.mu.Lock()
+			p.settles = len(p.records)
+			p.mu.Unlock()
 			return answer, record
 		}
 		if time.Now().After(deadline) {
