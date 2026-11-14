@@ -64,6 +64,41 @@ func TestBusCollectsHandlerErrors(t *testing.T) {
 	}
 }
 
+func TestEmitGateOnlyCancelVetoes(t *testing.T) {
+	// A handler that fails has not said "no": the operation proceeds
+	// and the error is handed back for the caller to report.
+	bus := NewBus()
+	bus.On(EventSessionBeforeFork, func(e *Event) error {
+		return errors.New("boom")
+	})
+	ok, err := bus.EmitGate(&Event{Type: EventSessionBeforeFork})
+	if err == nil {
+		t.Error("want the handler's error")
+	}
+	if !ok {
+		t.Error("a handler error must not veto the operation")
+	}
+
+	// An explicit cancel does veto it.
+	bus = NewBus()
+	bus.On(EventSessionBeforeFork, func(e *Event) error {
+		e.Cancel = true
+		e.BlockReason = "not now"
+		return nil
+	})
+	ev := &Event{Type: EventSessionBeforeFork}
+	ok, err = bus.EmitGate(ev)
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if ok {
+		t.Error("the cancel did not veto the operation")
+	}
+	if ev.BlockReason != "not now" {
+		t.Errorf("reason = %q, want the handler's reason", ev.BlockReason)
+	}
+}
+
 func TestBusMutationSemantics(t *testing.T) {
 	bus := NewBus()
 	bus.On(EventBeforeAgentStart, func(e *Event) error {

@@ -123,6 +123,13 @@ type ConsultParams struct {
 	BashCommand string `json:"bashCommand,omitempty"`
 	// Text carries whatever text the event carries.
 	Text string `json:"text,omitempty"`
+	// Reason says what kind of operation the event is about: "new" for
+	// a switch, "fork" or "clone" for a fork.
+	Reason string `json:"reason,omitempty"`
+	// SessionID is the session a switch moves to.
+	SessionID string `json:"sessionId,omitempty"`
+	// EntryID is the branch point of a fork or a tree move.
+	EntryID string `json:"entryId,omitempty"`
 	// Data carries arbitrary structured data.
 	Data map[string]any `json:"data,omitempty"`
 }

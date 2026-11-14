@@ -162,23 +162,26 @@ manifest 里写 `"consults": ["tool_call"]` 才会被问到；没声明的扩展
 `{ output: "denied", exitCode: 1 }`）。auto-harness 的 `user_bash` 直接有
 `e.Block` / `e.BlockReason`，拒绝是一条命令的事，不用伪造执行结果。
 
-**6. 没做的：pi 的另外三个可取消事件。** pi 有 `session_before_switch` /
-`session_before_fork` / `session_before_tree`，都返回 `{ cancel: true }` 取消切换/
-分叉/树导航。auto-harness 只做了 `session_before_compact` 一个——另外三个需要会话
-树支持取消语义（切换被拒之后 UI 怎么办、分叉到一半失败了怎么收拾），不是加个字段
-的事，留着。
+**6. 四个可取消的会话事件都做了，语义是「动手之前问」。** `session_before_switch`
+（RPC 的 `new_session`）、`session_before_fork`（`/fork`、`/clone` 和 RPC 的 fork）、
+`session_before_tree`（`/tree` 切换分支）和 `session_before_compact` 都在**写任何
+东西之前**发事件：`Cancel` 一出，操作就不发生，会话保持原样——不会留下写了一半的
+分叉文件，叶子也不会移动，命令只打一行 `cancelled: <原因>` 就回到提示符。这和
+pi 的问题一样是"切换被拒之后 UI 怎么办、分叉失败怎么收拾"，答案是把问的时间点放在
+副作用之前。差别在载荷：pi 的 `session_before_tree` 还能让扩展提供自定义分支摘要，
+auto-harness 的 `/tree` 不做摘要，所以只支持取消；pi 的 fork 分 `position: before/at`，
+auto-harness 的 `/fork` 和 `/clone` 都从某个 entry 开始，所以用 `reason: fork/clone`
+区分命令，`session_before_switch` 目前只有 `reason: "new"`（没有切换会话的命令）。
 
-**7. 事件集：auto-harness 多的一个，pi 多的是二十一个。** auto-harness 有 pi 没有的
+**7. 事件集：auto-harness 多的一个，pi 多的是十八个。** auto-harness 有 pi 没有的
 `request_start`（一次模型请求的事实：provider / model / 工具数，用来测量单次请求而
-不改 provider）。pi 多出来的 21 个大致分四类：**会话切换审批**
-（`session_before_switch` / `session_before_fork` / `session_before_tree` /
-`project_trust`）、**provider 挂钩**（`before_provider_headers` /
-`before_provider_request` / `after_provider_response` / `provider_stream_event`）、
-**UI 与选择**（`ui_prompt_start` / `ui_prompt_end` / `model_select` /
-`thinking_level_select` / `cache_warming_decision`）、**生命周期补集**
-（`agent_settled` / `agent_before_settle` / `session_compact_failed` / `session_tree` /
-`session_info_changed` / `context_with_system` / `mcp_servers_change` /
-`resources_discover`）。
+不改 provider）。pi 多出来的 18 个大致分四类：**信任审批**（`project_trust`）、
+**provider 挂钩**（`before_provider_headers` / `before_provider_request` /
+`after_provider_response` / `provider_stream_event`）、**UI 与选择**
+（`ui_prompt_start` / `ui_prompt_end` / `model_select` / `thinking_level_select` /
+`cache_warming_decision`）、**生命周期补集**（`agent_settled` / `agent_before_settle` /
+`session_compact_failed` / `session_tree` / `session_info_changed` /
+`context_with_system` / `mcp_servers_change` / `resources_discover`）。
 
 auto-harness 的 provider 挂钩不在事件总线上，而在 `llm.Hooks`（`BeforeHeaders` /
 `BeforeRequest` / `AfterResponse`）——它们服务的是 HTTP 层（改头、改请求体、读响应），
@@ -417,7 +420,8 @@ handler 签名 `func(e *ext.Event) error`，按注册顺序同步执行；出错
 | `tool_call` | 工具执行**之前** | 改 `e.ToolCall`（改参数）、`e.Block` + `e.BlockReason` 拦截 |
 | `tool_execution_start` / `tool_execution_update` / `tool_result` / `tool_execution_end` | 工具执行生命周期 | — |
 | `context` | 发给 Provider 前 | 替换 `e.Messages`（上下文改写） |
-| `session_before_compact` / `session_compact` | 压缩历史 | 提供 `e.Messages` 扮演压缩器 |
+| `session_before_compact` / `session_compact` | 压缩历史 | 提供 `e.Messages` 扮演压缩器；`e.Cancel` 放弃这次压缩 |
+| `session_before_switch` / `session_before_fork` / `session_before_tree` | 换会话、分叉、`/tree` 导航**之前** | `e.Cancel` 取消，操作不发生；携带 `e.Reason`（`new` / `fork` / `clone`）、`e.EntryID`（分叉点或树目标，当前分支在 `e.Data["from"]`） |
 | `input` | 每次 Run 开始、prompt 交给模型之前 | 改 `e.Text` 改写；`e.Cancel` 表示扩展已处理这行，不跑 |
 | `user_bash` | `!` 快捷执行 shell 命令前 | `e.Block` + `e.BlockReason` 拦截；携带 `e.BashCommand` 和 `e.ExcludeFromContext` |
 
@@ -451,7 +455,7 @@ harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_cal
 扩展 → harness: {"id":3,"result":{"block":true,"reason":"不允许"}}
 ```
 
-被问的事件有四个，它们是内核真正要做决定的地方：
+被问的事件有七个，它们是内核真正要做决定的地方：
 
 | 事件 | 时机 | 回答的效果 |
 |------|------|-----------|
@@ -459,11 +463,18 @@ harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_cal
 | `user_bash` | `!` 快捷执行命令之前 | `block`：命令不执行 |
 | `input` | 每次 Run 开始、prompt 交给模型之前 | `text`：替换 prompt；`cancel`：扩展自己处理了这行，不跑 |
 | `session_before_compact` | 压缩历史之前 | `cancel`：放弃这次压缩 |
+| `session_before_switch` | 换新会话之前（RPC `new_session`） | `cancel`：不换，会话继续 |
+| `session_before_fork` | `/fork`、`/clone` 写文件之前 | `cancel`：不写分叉文件，会话不变 |
+| `session_before_tree` | `/tree` 移动分支之前 | `cancel`：叶子不动 |
 
-请求带 `toolCall`（含模型原始的 arguments）、`bashCommand`、`text`、`data`，扩展
-拿到的是工具本身会看到的原始参数。回答是 `{"block":true,"reason":"..."}`；
-`session_before_compact` 和 `input` 也可以答 `{"cancel":true}`，`input` 还能答
-`{"text":"..."}` 来改写 prompt。
+请求带 `toolCall`（含模型原始的 arguments）、`bashCommand`、`text`、`reason`、
+`sessionId`、`entryId`、`data`，扩展拿到的是工具本身会看到的原始参数。回答是
+`{"block":true,"reason":"..."}`；压缩和三个会话事件答 `{"cancel":true}`（`reason`
+里的话会打印给用户），`input` 还能答 `{"text":"..."}` 来改写 prompt。
+
+三个会话事件的问在**任何副作用之前**：取消之后不会留下写了一半的分叉文件，叶子也
+不会已经移走才发现被拒——REPL 的 `/fork`、`/tree` 打一行 `cancelled: <原因>` 就回到
+提示符，RPC 的 `new_session` / `fork` 回一条带原因的失败响应。
 
 扩展要在 manifest 里声明它想被问到哪些事件：
 
@@ -485,7 +496,8 @@ harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_cal
   不是拒绝——不然通道出现之前写的扩展会把每一次工具调用都弄挂。
 
 进程内扩展（Go 写的）用同一个事件总线，改 `e.Block` / `e.BlockReason`（门）或
-`e.Text` / `e.Cancel`（prompt）就直接生效；子进程扩展则多走一次 JSON-RPC。
+`e.Text` / `e.Cancel`（prompt 和会话操作）就直接生效；子进程扩展则多走一次
+JSON-RPC。
 
 可执行文件放在 `~/.harness/extensions/`、`<项目>/.harness/extensions/` 或
 `config.json` 的 `extension_dirs` 里（目录内的可执行文件都会被发现）。完整示例见
@@ -1187,7 +1199,7 @@ go test -tags e2e -timeout 600s -v ./e2e/
 - **MCP 工具接入**（[mcp/](mcp/)）：Model Context Protocol 客户端——stdio 子进程与 streamable HTTP 两种传输、`initialize` 握手与能力协商、`tools/list` 分页发现、`tools/call` 调用、工具以 `mcp__<server>__<tool>` 命名桥接进 `tools.Registry`；`mcp.json` 配置读取与用户级/项目级合并、`-mcp-list` 与 `/mcp` 命令；一个 server 失败不影响其他
 - **会话树与分叉**（[session/tree.go](session/tree.go)、[session/fork.go](session/fork.go)）：会话文件升级为树格式（entry 带 `id`/`parentId`），`/tree` 列出并切换分支（模型上下文随分支切换），`/fork` 从指定用户消息分叉出独立会话文件、`/clone` 复制当前分支；当前位置（`leaf_pointer`）持久化，重载会话能回到正在走的分支；压缩写成 `compaction` entry（摘要替代被压缩的消息，原文保留在文件里）；旧 v1 线性格式加载时自动迁移
 - **扩展动态加载与热重载**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)、[ext/scope.go](ext/scope.go)）：进程扩展协议（stdio 上的 JSON-RPC，扩展可用任何语言写）、manifest 握手、工具桥接、事件转发、扩展发现（`~/.harness/extensions`、项目目录、`config.json` 的 `extension_dirs`）；`/reload` 按 pi 语义重载（`session_shutdown` → 撤销注册 → 重新 `Setup` → `session_start`），注册项由 harness 自动记录并撤销，扩展只需实现 `ext.Teardown` 释放子进程等资源
-- **扩展的反向通道（`event.consult`）**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)）：扩展原来只能往 harness 推事件，没法否决 harness 要做的事——它能提供工具，却拦不住一次调用。补一条 host→extension 的请求通道：harness 在动手之前问一句「这件事允许吗」，扩展答 `{"block":true,"reason":"..."}` 就否决，问的是内核真正要做决定的四件事（`tool_call` / `user_bash` / `input` / `session_before_compact`），其中 `input` 除了否决还能用 `{"text":"..."}` 改写 prompt。失败策略沿用 pi 的 **fail-closed**（"gate handlers should fail closed when their safety decision cannot be made"）——答不上来就拦下，坏掉的策略扩展不能变成一扇开着的门；`input` 是唯一的例外，改写算不出来就保持原样（否则坏扩展会吃掉每条消息）；比 pi 多两层保障：**等待有上限**（pi 的进程内 handler 卡住会挂住 harness，这里 5 秒放手）和**没声明就不问**（manifest 里写 `"consults": [...]` 才被问到，没声明的扩展它的沉默不算拒绝）。另外**已被否决的调用不再去问用户**（权限层看到 `e.Block` 就跳过）。进程内扩展走同一个事件总线用 `e.Block`，子进程扩展多走一次 JSON-RPC，两边语义一致
+- **扩展的反向通道（`event.consult`）**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)）：扩展原来只能往 harness 推事件，没法否决 harness 要做的事——它能提供工具，却拦不住一次调用。补一条 host→extension 的请求通道：harness 在动手之前问一句「这件事允许吗」，扩展答 `{"block":true,"reason":"..."}` 就否决，问的是内核真正要做决定的七件事（`tool_call` / `user_bash` / `input` / `session_before_compact` 和三个会话操作 `session_before_switch` / `session_before_fork` / `session_before_tree`），其中 `input` 除了否决还能用 `{"text":"..."}` 改写 prompt，会话操作用 `{"cancel":true}` 否决（问在任何副作用之前，取消后会话原样不动）。失败策略沿用 pi 的 **fail-closed**（"gate handlers should fail closed when their safety decision cannot be made"）——答不上来就拦下，坏掉的策略扩展不能变成一扇开着的门；`input` 是唯一的例外，改写算不出来就保持原样（否则坏扩展会吃掉每条消息）；比 pi 多两层保障：**等待有上限**（pi 的进程内 handler 卡住会挂住 harness，这里 5 秒放手）和**没声明就不问**（manifest 里写 `"consults": [...]` 才被问到，没声明的扩展它的沉默不算拒绝）。另外**已被否决的调用不再去问用户**（权限层看到 `e.Block` 就跳过）。进程内扩展走同一个事件总线用 `e.Block`，子进程扩展多走一次 JSON-RPC，两边语义一致
 - **TUI 差分渲染**（[tui/](tui/)）：帧差分只重写变化的行、CSI 2026 同步输出防闪烁、ANSI 感知的显示宽度（含 CJK 宽字符）、Component 体系（Text/Container/VStack/HStack/Transcript/Editor）、主屏与备用屏两种渲染器。`-tui` 启用；模型输出流式更新单行，编辑器行不抖动
 - **上下文压缩**：内置 LLM 摘要压缩器（`agent.NewSummarizer`），REPL `/compact` 直接可用；扩展仍可通过 `session_before_compact` 钩子接管（钩子优先）
 - **推理透传**：OpenAI 兼容流的 `reasoning_content`、Anthropic 流的 `thinking` 块都会作为 thinking 增量流向 UI（`-show-thinking` 显示），且不会污染转录内容。**同一个 chunk 同时带 reasoning 和正文时，两个都要出来**——早期实现遇到 reasoning 就直接 return，正文被整段吞掉，于是模型的回答缺了开头几个字（`HARNESS_SKILL_HIDDEN` 变成 `KILL_HIDDEN`）；现在多出来的事件进队列，下一次 `Recv` 取出来

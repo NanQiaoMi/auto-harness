@@ -61,6 +61,22 @@ const (
 	EventSessionBeforeCompact EventType = "session_before_compact"
 	EventSessionCompact       EventType = "session_compact"
 
+	// EventSessionBeforeSwitch fires before the runtime replaces the
+	// session with a new one. Reason carries what asked for it ("new").
+	// A handler may cancel it with Cancel.
+	EventSessionBeforeSwitch EventType = "session_before_switch"
+
+	// EventSessionBeforeFork fires before /fork or /clone writes a new
+	// session file. Reason is "fork" or "clone"; EntryID is the entry
+	// the new session branches from. A handler may cancel it with
+	// Cancel.
+	EventSessionBeforeFork EventType = "session_before_fork"
+
+	// EventSessionBeforeTree fires before /tree moves the session to
+	// another branch. EntryID is the target entry, and Data["from"] is
+	// the branch being left. A handler may cancel the move with Cancel.
+	EventSessionBeforeTree EventType = "session_before_tree"
+
 	// EventInput fires at the start of every run, with the prompt the
 	// agent is about to receive.
 	//
@@ -128,6 +144,14 @@ type Event struct {
 
 	// Data is an escape hatch for extension-specific payloads.
 	Data map[string]any
+
+	// SessionID is the session a switch moves to
+	// (session_before_switch). It is empty when the switch starts a
+	// fresh session.
+	SessionID string
+	// EntryID is the entry a fork or a tree move is anchored at
+	// (session_before_fork, session_before_tree).
+	EntryID string
 
 	// BashCommand is the command the user ran through the "!"
 	// shortcut (user_bash).
@@ -212,6 +236,17 @@ func (b *Bus) Emit(e *Event) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// EmitGate dispatches an event that gates an operation and reports
+// whether the operation may proceed.
+//
+// Unlike Emit, a handler error does not veto: only an explicit Cancel
+// does. A handler that failed to decide has not said "no", and the
+// caller decides whether to surface the error.
+func (b *Bus) EmitGate(e *Event) (proceed bool, err error) {
+	err = b.Emit(e)
+	return !e.Cancel, err
 }
 
 // HandlerCount returns the number of handlers for an event type.

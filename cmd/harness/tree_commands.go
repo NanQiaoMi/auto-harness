@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,35 @@ type treeSession struct {
 	ag *agent.Agent
 	// dir is where sessions are stored.
 	dir string
+	// bus carries the approval events the commands fire.
+	bus *ext.Bus
+}
+
+// gate fires a session approval event and reports whether the
+// operation may proceed.
+//
+// The gate comes before the operation touches anything, on purpose: a
+// veto must not leave a half-written session or a moved leaf behind.
+// A handler error is reported but does not veto — only an explicit
+// Cancel stops the operation.
+func (ts *treeSession) gate(ev *ext.Event) bool {
+	if ts.bus == nil {
+		return true
+	}
+	ok, err := ts.bus.EmitGate(ev)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	}
+	return ok
+}
+
+// cancellation is the line printed when an extension vetoes a session
+// operation.
+func cancellation(ev *ext.Event, fallback string) string {
+	if ev.BlockReason != "" {
+		return "cancelled: " + ev.BlockReason
+	}
+	return fallback
 }
 
 // registerTreeCommands wires the session-tree commands: /tree lists and
@@ -161,6 +191,15 @@ func resolveEntry(tree *session.Tree, ref string) string {
 // switchBranch moves the session to another branch and reloads the
 // agent's history from it.
 func switchBranch(ts *treeSession, id string) error {
+	ev := &ext.Event{
+		Type:    ext.EventSessionBeforeTree,
+		EntryID: id,
+		Data:    map[string]any{"from": ts.sess.Tree().LeafID()},
+	}
+	if !ts.gate(ev) {
+		fmt.Println(cancellation(ev, "tree navigation cancelled by an extension"))
+		return nil
+	}
 	if err := ts.sess.SetLeaf(id); err != nil {
 		return err
 	}
@@ -199,6 +238,20 @@ func runFork(ts *treeSession, args string, clone bool) error {
 		} else {
 			forkAt = resolveEntry(tree, forkAt)
 		}
+	}
+
+	// The event fires before the fork writes a file, so a veto leaves
+	// no half-forked session behind.
+	reason := "fork"
+	entry := forkAt
+	if clone {
+		reason = "clone"
+		entry = tree.LeafID()
+	}
+	ev := &ext.Event{Type: ext.EventSessionBeforeFork, Reason: reason, EntryID: entry}
+	if !ts.gate(ev) {
+		fmt.Println(cancellation(ev, reason+" cancelled by an extension"))
+		return nil
 	}
 
 	dst, err := session.Fork(ts.sess, session.ForkOptions{

@@ -3,6 +3,7 @@ package ext
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,6 +255,102 @@ func TestProcessExtensionThatDoesNotAnswerLeavesTheInputAlone(t *testing.T) {
 		t.Errorf("the consult took %s, want it bounded by %s", elapsed, consultTimeout)
 	}
 }
+
+// TestProcessExtensionCanVetoASessionOperation verifies the consult
+// channel on the session approval events.
+//
+// The extension answers differently for a fork and a clone, so the
+// test also proves the event's reason reaches it: a missing field would
+// let the fork through.
+func TestProcessExtensionCanVetoASessionOperation(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "session.py")
+	writeFile(t, script, pythonSessionExtensionScript)
+
+	bus := NewBus()
+	api := NewAPI(bus, tools.NewRegistry(), NewCommandRegistry())
+
+	pe := NewProcessExtension("python3", script)
+	if err := pe.Setup(api); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	defer pe.Stop()
+
+	ev := &Event{Type: EventSessionBeforeFork, Reason: "fork", EntryID: "e1"}
+	if err := bus.Emit(ev); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if !ev.Cancel {
+		t.Fatal("the fork was not cancelled")
+	}
+	if !strings.Contains(ev.BlockReason, "forking is not allowed") {
+		t.Errorf("reason = %q, want the extension's reason", ev.BlockReason)
+	}
+
+	// A clone is allowed, so the extension really did decide and was
+	// not just failing to answer.
+	ev = &Event{Type: EventSessionBeforeFork, Reason: "clone", EntryID: "e1"}
+	if err := bus.Emit(ev); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if ev.Cancel {
+		t.Errorf("the clone was cancelled: %s", ev.BlockReason)
+	}
+
+	// And the other session gate is asked too.
+	ev = &Event{Type: EventSessionBeforeSwitch, Reason: "new"}
+	if err := bus.Emit(ev); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if ev.Cancel {
+		t.Errorf("the switch was cancelled: %s", ev.BlockReason)
+	}
+}
+
+// pythonSessionExtensionScript is an extension that refuses forks but
+// allows clones and new sessions.
+const pythonSessionExtensionScript = `
+import json, sys
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    line = line.strip()
+    if not line:
+        return read()
+    return json.loads(line)
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+MANIFEST = {
+    "name": "session-policy",
+    "description": "approves session operations",
+    "consults": ["session_before_switch", "session_before_fork", "session_before_tree"],
+}
+
+while True:
+    try:
+        msg = read()
+    except Exception:
+        break
+    if msg is None:
+        break
+    method = msg.get("method", "")
+    mid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "manifest":
+        send({"id": mid, "result": MANIFEST})
+    elif method == "event.consult":
+        if params.get("event") == "session_before_fork" and params.get("reason") == "fork":
+            send({"id": mid, "result": {"cancel": True, "reason": "forking is not allowed"}})
+        else:
+            send({"id": mid, "result": {}})
+    elif method == "shutdown":
+        send({"id": mid, "result": {}})
+        break
+`
 
 // pythonVetoExtensionScript is an extension that blocks the calls whose
 // command mentions "rm -rf".

@@ -89,6 +89,79 @@ func newTestServer(t *testing.T, provider llm.Provider) (*Server, *ext.Bus, *ses
 	return server, bus, sess
 }
 
+func TestNewSessionCanBeCancelled(t *testing.T) {
+	server, bus, sess := newTestServer(t, &fakeProvider{})
+	server.SessionDir = t.TempDir()
+	id := sess.Meta.ID
+
+	bus.On(ext.EventSessionBeforeSwitch, func(e *ext.Event) error {
+		if e.Reason != "new" {
+			t.Errorf("reason = %q, want new", e.Reason)
+		}
+		e.Cancel = true
+		e.BlockReason = "not now"
+		return nil
+	})
+
+	resp := server.newSession(&Command{Type: CmdNewSession})
+	if resp.Success {
+		t.Error("the vetoed new_session reported success")
+	}
+	if !strings.Contains(resp.Error, "not now") {
+		t.Errorf("error = %q, want the extension's reason", resp.Error)
+	}
+	if server.Session.Meta.ID != id {
+		t.Error("the session was replaced despite the veto")
+	}
+}
+
+func TestForkCanBeCancelled(t *testing.T) {
+	server, bus, sess := newTestServer(t, &fakeProvider{})
+	server.SessionDir = t.TempDir()
+	if err := sess.Append(llm.Message{Role: llm.RoleUser, Content: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := json.Marshal(ForkCommand{Type: CmdFork})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unsubscribe := bus.On(ext.EventSessionBeforeFork, func(e *ext.Event) error {
+		if e.Reason != "fork" {
+			t.Errorf("reason = %q, want fork", e.Reason)
+		}
+		if e.EntryID == "" {
+			t.Error("the event carries no entry to fork from")
+		}
+		e.Cancel = true
+		return nil
+	})
+
+	resp := server.fork(&Command{Type: CmdFork, raw: raw}, "fork")
+	if resp.Success {
+		t.Error("the vetoed fork reported success")
+	}
+	if list, err := session.List(server.SessionDir); err != nil {
+		t.Fatal(err)
+	} else if len(list) != 0 {
+		t.Errorf("a cancelled fork wrote %d sessions", len(list))
+	}
+
+	// The same command with the veto lifted writes the fork into the
+	// configured session directory.
+	unsubscribe()
+	resp = server.fork(&Command{Type: CmdFork, raw: raw}, "fork")
+	if !resp.Success {
+		t.Fatalf("the approved fork failed: %s", resp.Error)
+	}
+	if list, err := session.List(server.SessionDir); err != nil {
+		t.Fatal(err)
+	} else if len(list) != 1 {
+		t.Errorf("the approved fork wrote %d sessions, want 1", len(list))
+	}
+}
+
 // records reads the records the server wrote.
 func records(t *testing.T, out *bytes.Buffer) []map[string]any {
 	t.Helper()

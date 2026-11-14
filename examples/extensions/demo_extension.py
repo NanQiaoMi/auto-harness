@@ -57,7 +57,12 @@ def manifest():
         # The harness asks the extension about these events before it
         # acts on them. An extension that does not name an event is
         # never asked, so its silence is not a refusal.
-        "consults": ["tool_call", "user_bash", "input"],
+        "consults": [
+            "tool_call", "user_bash", "input",
+            # Session operations: the harness asks before it writes or
+            # moves anything, so a veto leaves the session untouched.
+            "session_before_switch", "session_before_fork", "session_before_tree",
+        ],
         "tools": [
             {
                 "name": "demo_echo",
@@ -135,6 +140,13 @@ def consult(params):
 
     if event == "session_before_compact":
         # Let the harness compact on its own.
+        return {}
+
+    if event in ("session_before_switch", "session_before_fork", "session_before_tree"):
+        # Veto a new session, a fork or a /tree move with
+        # {"cancel": True, "reason": "..."} — the harness asks before it
+        # writes or moves anything, so nothing is left half-done. This
+        # demo allows them.
         return {}
     return {}
 

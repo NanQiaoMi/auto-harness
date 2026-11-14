@@ -129,11 +129,11 @@ func (e *ProcessExtension) Setup(api *API) error {
 	// handler sits on the bus like any other, so the veto travels the
 	// same path an in-process extension's would.
 	//
-	// The four events are the ones the harness asks about: a tool
-	// call, a shell command, the prompt a run is about to send, and
-	// the moment before the history is compacted. They are the places
-	// where the decision belongs to the extension — one can only say
-	// no, and the prompt can also be rewritten.
+	// These are the events the harness asks about: a tool call, a
+	// shell command, the prompt a run is about to send, and the
+	// session operations that replace or move the conversation. They
+	// are the places where the decision belongs to the extension — one
+	// can only say no, and the prompt can also be rewritten.
 	api.On(EventToolCall, func(ev *Event) error {
 		e.consult(ev)
 		return nil
@@ -147,6 +147,18 @@ func (e *ProcessExtension) Setup(api *API) error {
 		return nil
 	})
 	api.On(EventSessionBeforeCompact, func(ev *Event) error {
+		e.consult(ev)
+		return nil
+	})
+	api.On(EventSessionBeforeSwitch, func(ev *Event) error {
+		e.consult(ev)
+		return nil
+	})
+	api.On(EventSessionBeforeFork, func(ev *Event) error {
+		e.consult(ev)
+		return nil
+	})
+	api.On(EventSessionBeforeTree, func(ev *Event) error {
 		e.consult(ev)
 		return nil
 	})
@@ -185,9 +197,12 @@ func (e *ProcessExtension) consult(ev *Event) {
 		return
 	}
 	params := ConsultParams{
-		Event: string(ev.Type),
-		Text:  ev.Text,
-		Data:  ev.Data,
+		Event:     string(ev.Type),
+		Text:      ev.Text,
+		Reason:    ev.Reason,
+		SessionID: ev.SessionID,
+		EntryID:   ev.EntryID,
+		Data:      ev.Data,
 	}
 	if ev.ToolCall != nil {
 		params.ToolCall = &ConsultToolCall{
@@ -214,13 +229,18 @@ func (e *ProcessExtension) consult(ev *Event) {
 	if out.Text != nil {
 		ev.Text = *out.Text
 	}
-	if out.Cancel {
-		ev.Cancel = true
-	}
-	if !out.Block {
+	if out.Block {
+		e.refuse(ev, out.Reason)
 		return
 	}
-	e.refuse(ev, out.Reason)
+	if out.Cancel {
+		ev.Cancel = true
+		// Keep the extension's explanation: the caller reports it to
+		// the user in place of the generic "cancelled by an extension".
+		if out.Reason != "" && ev.BlockReason == "" {
+			ev.BlockReason = out.Reason
+		}
+	}
 }
 
 // consults reports whether the extension asked to be consulted about
@@ -239,11 +259,14 @@ func (e *ProcessExtension) consults(t EventType) bool {
 // refuse stops the operation the event guards.
 //
 // The veto mechanisms are not the same: a tool call and a shell command
-// are blocked (the reason is reported back to the model), while a
-// compaction and a prompt are cancelled (in neither is a model waiting
-// for a reason). The reason is kept on the event either way.
+// are blocked (the reason is reported back to the model), while
+// compaction, the prompt and the session operations are cancelled (in
+// none of them is a model waiting for a reason). The reason is kept on
+// the event either way.
 func (e *ProcessExtension) refuse(ev *Event, reason string) {
-	if ev.Type == EventSessionBeforeCompact || ev.Type == EventInput {
+	switch ev.Type {
+	case EventSessionBeforeCompact, EventInput,
+		EventSessionBeforeSwitch, EventSessionBeforeFork, EventSessionBeforeTree:
 		ev.Cancel = true
 		ev.BlockReason = reason
 		return

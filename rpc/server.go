@@ -196,9 +196,9 @@ func (s *Server) dispatch(ctx context.Context, command *Command) *Response {
 	case CmdGetCommands:
 		return s.getCommands(command)
 	case CmdFork:
-		return s.fork(command)
+		return s.fork(command, "fork")
 	case CmdClone:
-		return s.fork(&Command{ID: command.ID, Type: CmdFork, raw: command.raw})
+		return s.fork(&Command{ID: command.ID, Type: CmdFork, raw: command.raw}, "clone")
 	default:
 		return Failure(command.ID, command.Type, fmt.Sprintf("Unknown command: %s", command.Type))
 	}
@@ -262,8 +262,32 @@ func (s *Server) abort(command *Command) *Response {
 	return Success(command.ID, CmdAbort, nil)
 }
 
+// gate fires a session approval event and reports whether the
+// operation may proceed.
+//
+// A handler error is reported on the event stream but does not veto:
+// only an explicit Cancel stops the operation.
+func (s *Server) gate(ev *ext.Event) bool {
+	if s.Agent == nil || s.Agent.Bus == nil {
+		return true
+	}
+	ok, err := s.Agent.Bus.EmitGate(ev)
+	if err != nil {
+		s.emit(map[string]any{"type": "error", "message": err.Error()})
+	}
+	return ok
+}
+
 // newSession starts a fresh session.
 func (s *Server) newSession(command *Command) *Response {
+	ev := &ext.Event{Type: ext.EventSessionBeforeSwitch, Reason: "new"}
+	if !s.gate(ev) {
+		reason := ev.BlockReason
+		if reason == "" {
+			reason = "the new session was cancelled by an extension"
+		}
+		return Failure(command.ID, CmdNewSession, reason)
+	}
 	if s.Session != nil {
 		_ = s.Session.Close()
 	}
@@ -451,8 +475,9 @@ func (s *Server) getCommands(command *Command) *Response {
 	return Success(command.ID, CmdGetCommands, payload)
 }
 
-// fork branches the session into a new file.
-func (s *Server) fork(command *Command) *Response {
+// fork branches the session into a new file. The reason says which
+// command asked for it: "fork" or "clone".
+func (s *Server) fork(command *Command, reason string) *Response {
 	if s.Session == nil {
 		return Failure(command.ID, CmdFork, "there is no session")
 	}
@@ -460,7 +485,26 @@ func (s *Server) fork(command *Command) *Response {
 	if err := decodeArgs(command.raw, &args); err != nil {
 		return Failure(command.ID, CmdFork, err.Error())
 	}
-	forked, err := session.Fork(s.Session, session.ForkOptions{AtEntryID: args.EntryID})
+	// The event fires before the file is written, so a veto leaves no
+	// half-forked session behind.
+	entry := args.EntryID
+	if entry == "" {
+		if tree := s.Session.Tree(); tree != nil {
+			entry = tree.LeafID()
+		}
+	}
+	ev := &ext.Event{Type: ext.EventSessionBeforeFork, Reason: reason, EntryID: entry}
+	if !s.gate(ev) {
+		msg := ev.BlockReason
+		if msg == "" {
+			msg = "the " + reason + " was cancelled by an extension"
+		}
+		return Failure(command.ID, CmdFork, msg)
+	}
+	forked, err := session.Fork(s.Session, session.ForkOptions{
+		Dir:       s.SessionDir,
+		AtEntryID: args.EntryID,
+	})
 	if err != nil {
 		return Failure(command.ID, CmdFork, err.Error())
 	}

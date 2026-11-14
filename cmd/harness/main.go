@@ -492,7 +492,7 @@ func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line stri
 // registerBuiltinCommands wires the REPL's own slash commands through
 // the same registry extensions use.
 func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, quiet *bool) {
-	registerTreeCommands(commands, &treeSession{sess: sess, ag: ag, dir: cfg.SessionDir})
+	registerTreeCommands(commands, &treeSession{sess: sess, ag: ag, dir: cfg.SessionDir, bus: bus})
 	commands.Register("help", &ext.Command{
 		Description: "list available commands",
 		Handler: func(ctx context.Context, args string) error {
