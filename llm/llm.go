@@ -142,7 +142,7 @@ type Hooks struct {
 // UserAgent identifies this harness to gateways that ask clients to
 // self-identify (e.g. OpenCode Go). Override per provider via ExtraHeaders
 // when embedding.
-const UserAgent = "auto-harness/0.1.3"
+const UserAgent = "auto-harness/0.1.4"
 
 // Collect drains a stream and returns the final assembled message and
 // usage. Deltas are passed to onDelta when non-nil. It is a convenience
