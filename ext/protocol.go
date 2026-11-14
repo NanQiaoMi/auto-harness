@@ -49,6 +49,14 @@ const (
 	MethodShutdown = "shutdown"
 	// MethodEvent is a notification from the extension.
 	MethodEvent = "event"
+	// MethodConsult asks the extension about an event, and waits for
+	// its answer.
+	//
+	// It is the other direction of the event channel: the extension
+	// pushes events with "event", and the harness asks the extension
+	// with "consult". A request carries an ID and expects a response
+	// with the same ID, so the extension can block a call and say so.
+	MethodConsult = "event.consult"
 )
 
 // Manifest describes an extension process.
@@ -90,6 +98,50 @@ type EventParams struct {
 	Text string `json:"text,omitempty"`
 	// Data carries arbitrary structured data.
 	Data map[string]any `json:"data,omitempty"`
+}
+
+// ConsultParams is the payload of an event.consult request.
+//
+// It carries the event the harness is about to act on, so the
+// extension can decide whether to let it happen.
+type ConsultParams struct {
+	// Event is the ext.EventType name.
+	Event string `json:"event"`
+	// ToolCall is the call the event is about, for the tool events.
+	ToolCall *ConsultToolCall `json:"toolCall,omitempty"`
+	// BashCommand is the command the event is about, for user_bash.
+	BashCommand string `json:"bashCommand,omitempty"`
+	// Text carries whatever text the event carries.
+	Text string `json:"text,omitempty"`
+	// Data carries arbitrary structured data.
+	Data map[string]any `json:"data,omitempty"`
+}
+
+// ConsultToolCall describes a tool call to the extension.
+//
+// The arguments come as the raw JSON the model produced, so the
+// extension sees exactly what the tool would see.
+type ConsultToolCall struct {
+	// ID is the call's id.
+	ID string `json:"id"`
+	// Name is the tool's name.
+	Name string `json:"name"`
+	// Arguments is the raw JSON of the call's arguments.
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// ConsultResult is the extension's answer to an event.consult request.
+//
+// It mirrors pi's ToolCallEventResult: the extension says whether to
+// block, and why.
+type ConsultResult struct {
+	// Block stops the event's operation from happening.
+	Block bool `json:"block,omitempty"`
+	// Reason explains the block. It is reported back to the model.
+	Reason string `json:"reason,omitempty"`
+	// Cancel stops the operation without a reason to report, for the
+	// events that are cancelled rather than blocked.
+	Cancel bool `json:"cancel,omitempty"`
 }
 
 // rpcConn is a JSON-RPC connection over a child's stdio.

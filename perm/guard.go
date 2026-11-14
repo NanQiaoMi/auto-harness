@@ -146,6 +146,12 @@ func (g *Guard) Setup(api *ext.API) error {
 		if e.ToolCall == nil {
 			return nil
 		}
+		// A call another extension already blocked needs no decision
+		// here: asking the user about a call that is not going to run
+		// is noise.
+		if e.Block {
+			return nil
+		}
 		g.check(e)
 		return nil
 	})

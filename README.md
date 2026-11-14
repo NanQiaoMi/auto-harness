@@ -352,6 +352,37 @@ harness → 扩展: {"id":2,"method":"tool.execute","params":{"name":"demo_echo"
 工具完全一样的工具；模型调用时，harness 把调用转发给子进程并把结果送回模型。扩展
 也可以主动推送事件到 harness 的事件总线。
 
+#### 反向通道：harness 问扩展
+
+`event` 是扩展往 harness 推事件的方向。反方向是 harness **问**扩展：harness 在
+真正动手之前问一句"这件事允许吗"，扩展可以否决。
+
+```
+harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_call","toolCall":{"id":"c1","name":"bash","arguments":{"command":"rm -rf /"}}}}
+扩展 → harness: {"id":3,"result":{"block":true,"reason":"不允许"}}
+```
+
+被问的事件有三个，它们是内核真正要做决定的三件事：
+
+| 事件 | 时机 | 否决的效果 |
+|------|------|-----------|
+| `tool_call` | 工具执行之前 | 工具不执行，原因作为错误结果回到模型 |
+| `user_bash` | `!` 快捷执行命令之前 | 命令不执行 |
+| `session_before_compact` | 压缩历史之前 | `cancel` 为真时放弃这次压缩 |
+
+请求带 `toolCall`（含模型原始的 arguments）、`bashCommand`、`text`、`data`，扩展
+拿到的是工具本身会看到的原始参数。回答是 `{"block":true,"reason":"..."}`；
+`session_before_compact` 也可以答 `{"cancel":true}`。
+
+两个细节：
+
+- **不回答就放行。** 扩展不回答、报错或者超时（5 秒），harness 照常执行——一个坏
+  扩展不能把整个会话冻住，比漏放一次调用坏得多。
+- **顺序不打扰人。** 已经被扩展否决的调用不会再走到权限层去问用户。
+
+进程内扩展（Go 写的）用同一个事件总线，`e.Block` / `e.BlockReason` 直接就位；
+子进程扩展则多走一次 JSON-RPC。
+
 可执行文件放在 `~/.harness/extensions/`、`<项目>/.harness/extensions/` 或
 `config.json` 的 `extension_dirs` 里（目录内的可执行文件都会被发现）。完整示例见
 [examples/extensions/demo_extension.py](examples/extensions/demo_extension.py)：

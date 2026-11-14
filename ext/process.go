@@ -15,9 +15,18 @@ import (
 // process.
 const handshakeTimeout = 10 * time.Second
 
+// consultTimeout bounds how long the harness waits for an extension's
+// answer to an event it is consulted about.
+//
+// It is short on purpose: the answer decides whether a tool call runs
+// now, and a model is waiting. An extension that is slow to answer is
+// treated as one that does not object.
+const consultTimeout = 5 * time.Second
+
 // ProcessExtension runs an external extension process and bridges it into
-// the harness: the tools it advertises become regular tools, and the
-// events it pushes are dispatched on the host bus.
+// the harness: the tools it advertises become regular tools, the events
+// it pushes are dispatched on the host bus, and the events it is
+// consulted about can be blocked by its answer.
 //
 // This is how extensions are written in any language: speak the JSON-RPC
 // protocol over stdin/stdout.
@@ -115,7 +124,73 @@ func (e *ProcessExtension) Setup(api *API) error {
 			return fmt.Errorf("ext: %s: register tool %q: %w", e.Command, mt.Name, err)
 		}
 	}
+
+	// The extension may veto the events it is consulted about. The
+	// handler sits on the bus like any other, so the veto travels the
+	// same path an in-process extension's would.
+	//
+	// The three events are the ones the harness asks about: a tool
+	// call, a shell command, and the moment before the history is
+	// compacted. They are the three the kernel acts on a decision
+	// about, so they are the three worth asking.
+	api.On(EventToolCall, func(ev *Event) error {
+		e.consult(ev)
+		return nil
+	})
+	api.On(EventUserBash, func(ev *Event) error {
+		e.consult(ev)
+		return nil
+	})
+	api.On(EventSessionBeforeCompact, func(ev *Event) error {
+		e.consult(ev)
+		return nil
+	})
 	return nil
+}
+
+// consult asks the extension about an event and applies its answer.
+//
+// The question goes out as a request, so the extension can answer
+// before the call runs. An extension that does not answer, or answers
+// with an error, lets the call through: a broken extension must not
+// freeze the harness, and blocking everything would be worse than
+// letting one call by.
+func (e *ProcessExtension) consult(ev *Event) {
+	conn := e.connection()
+	if conn == nil {
+		return
+	}
+	params := ConsultParams{
+		Event: string(ev.Type),
+		Text:  ev.Text,
+		Data:  ev.Data,
+	}
+	if ev.ToolCall != nil {
+		params.ToolCall = &ConsultToolCall{
+			ID:        ev.ToolCall.ID,
+			Name:      ev.ToolCall.Name,
+			Arguments: ev.ToolCall.Arguments,
+		}
+	}
+	if ev.BashCommand != "" {
+		params.BashCommand = ev.BashCommand
+	}
+	var out ConsultResult
+	if err := conn.callTimeout(MethodConsult, params, &out, consultTimeout); err != nil {
+		return
+	}
+	if out.Cancel {
+		ev.Cancel = true
+	}
+	if !out.Block {
+		return
+	}
+	reason := out.Reason
+	if reason == "" {
+		reason = "blocked by an extension"
+	}
+	ev.Block = true
+	ev.BlockReason = reason
 }
 
 // remoteTool wraps a remote tool so calling it proxies to the child.
