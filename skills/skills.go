@@ -132,10 +132,10 @@ func Load(path string) (*Skill, []Diagnostic) {
 	disableModelInvocation := strings.EqualFold(strings.TrimSpace(disable), "true")
 
 	return &Skill{
-		Name:                  name,
-		Description:           description,
-		Path:                  path,
-		Dir:                   dir,
+		Name:                   name,
+		Description:            description,
+		Path:                   path,
+		Dir:                    dir,
 		DisableModelInvocation: disableModelInvocation,
 	}, diagnostics
 }

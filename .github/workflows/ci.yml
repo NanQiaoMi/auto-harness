@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch makes the running one pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The toolchain follows the module: go.mod names the version
+          # the code is written against.
+          go-version-file: go.mod
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      - name: test (race)
+        run: go test -race ./...
+
+      - name: check the formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  e2e:
+    name: e2e (live model)
+    runs-on: ubuntu-latest
+    env:
+      # The key comes from the repository secrets, never from the
+      # workflow file.
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: run the live end-to-end tests
+        # Without a key there is no model to talk to, so the step is
+        # skipped rather than failed. The tests themselves skip too;
+        # this keeps the reason in one visible place.
+        if: ${{ env.OPENCODE_API_KEY != '' }}
+        # The model is fixed to deepseek-v4.1-flash in the test source,
+        # so the suite stays on the one model it was written for.
+        run: go test -tags e2e -timeout 600s ./e2e/ -v

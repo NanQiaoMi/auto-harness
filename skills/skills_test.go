@@ -133,8 +133,8 @@ Body.
 // refusing to load it would lose work the user has done.
 func TestLoadWarnsAboutAnInvalidName(t *testing.T) {
 	cases := []struct {
-		name  string
-		want  string
+		name string
+		want string
 	}{
 		{"UPPER", "invalid characters"},
 		{"under_score", "invalid characters"},
@@ -381,9 +381,9 @@ func TestFormatForPromptWithoutSkills(t *testing.T) {
 // model may not invoke is not advertised.
 func TestFormatForPromptHidesTheDisabledSkills(t *testing.T) {
 	skill := &Skill{
-		Name:                  "manual-only",
-		Description:           "Manual.",
-		Path:                  "/tmp/manual-only/SKILL.md",
+		Name:                   "manual-only",
+		Description:            "Manual.",
+		Path:                   "/tmp/manual-only/SKILL.md",
 		DisableModelInvocation: true,
 	}
 	if prompt := FormatForPrompt([]*Skill{skill}); prompt != "" {

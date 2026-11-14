@@ -72,9 +72,9 @@ type SetThinkingCommand struct {
 
 // CompactCommand compresses the conversation history.
 type CompactCommand struct {
-	ID      string `json:"id,omitempty"`
-	Type    string `json:"type"`
-	Custom  string `json:"customInstructions,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Type   string `json:"type"`
+	Custom string `json:"customInstructions,omitempty"`
 }
 
 // BashCommand runs a shell command.

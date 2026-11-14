@@ -575,4 +575,3 @@ func (p *blockingProvider) Chat(ctx context.Context, req llm.ChatRequest) (llm.S
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
-

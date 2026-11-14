@@ -33,8 +33,8 @@ func terminalSize(fd int) (int, int, error) {
 // VMIN and VTIME among them (the minimum number of bytes and the
 // timeout, in tenths of a second).
 const (
-	nccs = 32
-	vmin = 6
+	nccs  = 32
+	vmin  = 6
 	vtime = 5
 )
 

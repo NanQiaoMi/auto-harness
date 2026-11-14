@@ -1026,6 +1026,13 @@ go test -tags e2e -timeout 600s -v ./e2e/
 
 未设置 key 时这些测试自动跳过（`t.Skip`），所以 CI 上安全。
 
+### CI
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) 跑两个 job：
+
+- **build**：`ubuntu-latest` 和 `macos-latest` 两个平台上跑 `go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`，外加一个 gofmt 检查。工具链跟着 `go.mod` 走（`go-version-file: go.mod`），所以 CI 用的版本就是模块声明的那个。Linux 能跑是因为终端代码按平台拆开了：`tui/term_bsd.go` 用 BSD 的 termios 布局，`tui/term_linux.go` 用 Linux 的（控制字符在前，标志位在后，顺序相反）。**tag 上也会跑**（`tags: ["v*"]`）。
+- **e2e**：真实模型的端到端测试。key 从仓库 secret `OPENCODE_API_KEY` 读，**没有 key 时这一步跳过而不是失败**（`if: env.OPENCODE_API_KEY != ''`）——所以公开仓库克隆下来也不会红。模型固定 `deepseek-v4.1-flash`，和测试源码里写死的一致。
+
 ## Roadmap（深度拓展方向）
 
 按 pi 的演进路径，预留的深化方向：

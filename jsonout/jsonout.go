@@ -162,7 +162,7 @@ type Request struct {
 // interleave.
 type Writer struct {
 	out io.Writer
-	mu sync.Mutex
+	mu  sync.Mutex
 }
 
 // NewWriter creates a writer that writes to w.
