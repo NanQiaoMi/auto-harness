@@ -129,15 +129,20 @@ func (e *ProcessExtension) Setup(api *API) error {
 	// handler sits on the bus like any other, so the veto travels the
 	// same path an in-process extension's would.
 	//
-	// The three events are the ones the harness asks about: a tool
-	// call, a shell command, and the moment before the history is
-	// compacted. They are the three the kernel acts on a decision
-	// about, so they are the three worth asking.
+	// The four events are the ones the harness asks about: a tool
+	// call, a shell command, the prompt a run is about to send, and
+	// the moment before the history is compacted. They are the places
+	// where the decision belongs to the extension — one can only say
+	// no, and the prompt can also be rewritten.
 	api.On(EventToolCall, func(ev *Event) error {
 		e.consult(ev)
 		return nil
 	})
 	api.On(EventUserBash, func(ev *Event) error {
+		e.consult(ev)
+		return nil
+	})
+	api.On(EventInput, func(ev *Event) error {
 		e.consult(ev)
 		return nil
 	})
@@ -159,6 +164,12 @@ func (e *ProcessExtension) Setup(api *API) error {
 // extension that does not answer, answers with an error, or times out
 // blocks the operation. A broken policy extension must not become an
 // open door.
+//
+// input is the one exception, and it is not a gate: a rewrite that
+// cannot be computed has a safe default, the line the user typed. So
+// silence leaves the prompt alone instead of swallowing it. Failing
+// closed there would turn a broken extension into a harness that eats
+// every message.
 //
 // Two things keep this from being as sharp as pi's. The wait is
 // bounded (pi's in-process handler can hang the harness indefinitely),
@@ -190,10 +201,18 @@ func (e *ProcessExtension) consult(ev *Event) {
 	}
 	var out ConsultResult
 	if err := conn.callTimeout(MethodConsult, params, &out, consultTimeout); err != nil {
-		// The extension could not vouch for the operation, so the
-		// operation does not happen.
+		// input is a rewrite, not a gate: the safe default is the
+		// line the user typed, so a silent extension changes nothing.
+		if ev.Type == EventInput {
+			return
+		}
+		// Otherwise the extension could not vouch for the operation,
+		// so the operation does not happen.
 		e.refuse(ev, "the policy extension did not answer: "+err.Error())
 		return
+	}
+	if out.Text != nil {
+		ev.Text = *out.Text
 	}
 	if out.Cancel {
 		ev.Cancel = true
@@ -219,12 +238,14 @@ func (e *ProcessExtension) consults(t EventType) bool {
 
 // refuse stops the operation the event guards.
 //
-// The two veto mechanisms are not the same: a tool call and a shell
-// command are blocked (the reason is reported back to the model), while
-// a compaction is cancelled (there is no model waiting for a reason).
+// The veto mechanisms are not the same: a tool call and a shell command
+// are blocked (the reason is reported back to the model), while a
+// compaction and a prompt are cancelled (in neither is a model waiting
+// for a reason). The reason is kept on the event either way.
 func (e *ProcessExtension) refuse(ev *Event, reason string) {
-	if ev.Type == EventSessionBeforeCompact {
+	if ev.Type == EventSessionBeforeCompact || ev.Type == EventInput {
 		ev.Cancel = true
+		ev.BlockReason = reason
 		return
 	}
 	if reason == "" {

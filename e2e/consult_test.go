@@ -91,6 +91,92 @@ func TestLiveProcessExtensionVetoesAToolCall(t *testing.T) {
 	}
 }
 
+// TestLiveProcessExtensionRewritesThePrompt verifies the input consult
+// against a real model.
+//
+// The extension rewrites the prompt before the run starts, and the
+// model answers the rewritten instruction — proof that the rewrite
+// reached it rather than being dropped somewhere on the way.
+func TestLiveProcessExtensionRewritesThePrompt(t *testing.T) {
+	ag, _, bus := newAgent(t)
+
+	script := filepath.Join(t.TempDir(), "rewrite.py")
+	if err := os.WriteFile(script, []byte(rewriteInputExtensionScript), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	pe := ext.NewProcessExtension("python3", script)
+	api := ext.NewAPI(bus, ag.Tools, ext.NewCommandRegistry())
+	if err := pe.Setup(api); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	defer pe.Stop()
+
+	// The handler is registered after the extension's, so it sees what
+	// the run is actually about to send.
+	var seen string
+	bus.On(ext.EventInput, func(e *ext.Event) error {
+		seen = e.Text
+		return nil
+	})
+
+	res, err := ag.Run(context.Background(), "Reply with exactly: ORIGINAL")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if seen != "Reply with exactly: REWRITTEN" {
+		t.Fatalf("the run was about to send %q, want the rewritten prompt", seen)
+	}
+	if !strings.Contains(strings.ToUpper(res.Final), "REWRITTEN") {
+		t.Errorf("Final = %q, want the model to answer the rewritten prompt", res.Final)
+	}
+}
+
+// rewriteInputExtensionScript is a process extension that replaces
+// ORIGINAL with REWRITTEN in every prompt.
+const rewriteInputExtensionScript = `
+import json, sys
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    line = line.strip()
+    if not line:
+        return read()
+    return json.loads(line)
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+MANIFEST = {
+    "name": "rewrite",
+    "description": "rewrites the prompt",
+    "consults": ["input"],
+}
+
+while True:
+    try:
+        msg = read()
+    except Exception:
+        break
+    if msg is None:
+        break
+    method = msg.get("method", "")
+    mid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "manifest":
+        send({"id": mid, "result": MANIFEST})
+    elif method == "event.consult":
+        text = params.get("text", "")
+        send({"id": mid, "result": {"text": text.replace("ORIGINAL", "REWRITTEN")}})
+    elif method == "shutdown":
+        send({"id": mid, "result": {}})
+        break
+`
+
 // vetoExtensionScript is a process extension that vetoes every call to
 // the guarded_tool, and lets everything else through.
 const vetoExtensionScript = `

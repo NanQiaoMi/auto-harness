@@ -61,7 +61,16 @@ const (
 	EventSessionBeforeCompact EventType = "session_before_compact"
 	EventSessionCompact       EventType = "session_compact"
 
-	// User input (may transform or fully handle the line)
+	// EventInput fires at the start of every run, with the prompt the
+	// agent is about to receive.
+	//
+	// A handler may rewrite the prompt by setting Text, or deal with
+	// it itself by setting Cancel — the agent then does not run. The
+	// event fires inside Agent.Run, so every prompt passes through it,
+	// including the ones a skill or a prompt template produced. It is
+	// therefore the prompt as the model would see it, not the raw line
+	// the user typed: the "/" command registry and the "!" shortcut
+	// are handled before a run starts.
 	EventInput EventType = "input"
 
 	// EventUserBash fires when the user runs a shell command through
@@ -82,7 +91,9 @@ type Event struct {
 	// SystemPrompt is mutable on before_agent_start.
 	SystemPrompt string
 
-	// Text carries delta content for message_update / tool_execution_update.
+	// Text carries delta content for message_update /
+	// tool_execution_update, and the prompt for input (mutable: a
+	// handler may rewrite it).
 	Text string
 
 	// ToolCall / ToolResult are set on tool execution events.
@@ -93,7 +104,9 @@ type Event struct {
 	// entries appended for EventTurnEnd.
 	Messages []llm.Message
 
-	// Cancel asks the caller to abort the guarded operation.
+	// Cancel asks the caller to abort the guarded operation. On input it
+	// means the handler dealt with the prompt itself, so the agent must
+	// not run it.
 	Cancel bool
 
 	// Block stops the guarded operation from running (tool_call). The

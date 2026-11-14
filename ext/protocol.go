@@ -150,8 +150,13 @@ type ConsultResult struct {
 	// Reason explains the block. It is reported back to the model.
 	Reason string `json:"reason,omitempty"`
 	// Cancel stops the operation without a reason to report, for the
-	// events that are cancelled rather than blocked.
+	// events that are cancelled rather than blocked. On input it means
+	// the extension dealt with the prompt itself.
 	Cancel bool `json:"cancel,omitempty"`
+	// Text replaces the prompt (input only). It is a pointer so that an
+	// empty string — a prompt the extension emptied on purpose — is
+	// distinguishable from "no rewrite".
+	Text *string `json:"text,omitempty"`
 }
 
 // rpcConn is a JSON-RPC connection over a child's stdio.

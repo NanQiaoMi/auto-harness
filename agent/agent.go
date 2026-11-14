@@ -218,6 +218,28 @@ func (a *Agent) ReloadHistory() {
 // model is called repeatedly (with tool executions in between) until it
 // stops requesting tools or MaxTurns is reached.
 func (a *Agent) Run(ctx context.Context, input string) (*Result, error) {
+	// input: extensions see the prompt before it becomes a message.
+	// A handler may rewrite the text (add context, redact a secret,
+	// expand an alias) or deal with it itself, in which case the agent
+	// does not run.
+	//
+	// This is the one place every prompt passes through — the REPL,
+	// one-shot, JSON, RPC, a skill and a prompt template all arrive
+	// here — so the event cannot be skipped by an entry point that
+	// forgets to fire it.
+	inputEv := &ext.Event{Type: ext.EventInput, Text: input}
+	a.emit(inputEv)
+	if inputEv.Cancel {
+		// An extension that blocked the prompt owes the user a reason;
+		// the run produces no output, so this is the only place it can
+		// surface.
+		if inputEv.BlockReason != "" && a.Logf != nil {
+			a.Logf("input blocked: %s", inputEv.BlockReason)
+		}
+		return &Result{Cancelled: true}, nil
+	}
+	input = inputEv.Text
+
 	userMsg := llm.Message{Role: llm.RoleUser, Content: input}
 
 	// before_agent_start: extensions may rewrite the message or the

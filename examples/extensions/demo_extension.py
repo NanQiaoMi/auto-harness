@@ -15,6 +15,10 @@ operation may happen, and the extension may veto it.
     harness -> extension: {"id":3,"method":"event.consult","params":{"event":"tool_call",...}}
     extension -> harness: {"id":3,"result":{"block":true,"reason":"..."}}
 
+For a prompt ("input") the answer can rewrite it instead of refusing it:
+
+    extension -> harness: {"id":4,"result":{"text":"..."}}
+
 Run it directly to try it out:
 
     echo '{"id":1,"method":"manifest"}' | ./demo_extension.py
@@ -22,6 +26,7 @@ Run it directly to try it out:
 
 import json
 import sys
+from datetime import date
 
 # Commands the demo refuses to run. A real extension would have a
 # policy of its own here; this one keeps it short.
@@ -52,7 +57,7 @@ def manifest():
         # The harness asks the extension about these events before it
         # acts on them. An extension that does not name an event is
         # never asked, so its silence is not a refusal.
-        "consults": ["tool_call", "user_bash"],
+        "consults": ["tool_call", "user_bash", "input"],
         "tools": [
             {
                 "name": "demo_echo",
@@ -104,9 +109,12 @@ def consult(params):
     """Answer the harness's question about an operation.
 
     The harness asks before it acts, so a veto here stops the call
-    before it happens. Returning nothing means "no objection", and an
-    extension that never answers is treated the same way: a broken
-    extension must not freeze the harness.
+    before it happens. Returning nothing means "no objection".
+
+    For a gate, silence is not permission: when no answer arrives the
+    harness blocks the operation, so a broken policy extension cannot
+    become an open door. The prompt ("input") is the exception — a
+    rewrite that cannot be computed leaves the user's line alone.
     """
     event = params.get("event", "")
     call = params.get("toolCall") or {}
@@ -115,6 +123,15 @@ def consult(params):
 
     if command and any(bad in command for bad in BLOCKED_COMMANDS):
         return {"block": True, "reason": "the demo extension blocks %r" % command}
+
+    if event == "input":
+        # A rewrite, not a gate: answer with the text to use instead.
+        # Returning nothing leaves the prompt alone, which is also what
+        # happens when an extension is too slow to answer.
+        text = params.get("text", "")
+        if "{{today}}" in text:
+            return {"text": text.replace("{{today}}", date.today().isoformat())}
+        return {}
 
     if event == "session_before_compact":
         # Let the harness compact on its own.

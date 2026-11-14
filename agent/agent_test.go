@@ -195,6 +195,53 @@ func TestBeforeAgentStartCanRewriteAndCancel(t *testing.T) {
 	}
 }
 
+func TestInputCanRewriteAndHandle(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Message{{Content: "ok"}}}
+	ag, _, bus := newTestAgent(t, provider)
+
+	// The input event fires before the prompt becomes a message, so a
+	// handler that rewrites the text is what the model sees.
+	var order []ext.EventType
+	bus.On(ext.EventInput, func(e *ext.Event) error {
+		order = append(order, e.Type)
+		e.Text = "rewritten: " + e.Text
+		return nil
+	})
+	bus.On(ext.EventBeforeAgentStart, func(e *ext.Event) error {
+		order = append(order, e.Type)
+		return nil
+	})
+	if _, err := ag.Run(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.requests[0].Messages[0].Content; got != "rewritten: hi" {
+		t.Errorf("user message = %q", got)
+	}
+	if len(order) != 2 || order[0] != ext.EventInput || order[1] != ext.EventBeforeAgentStart {
+		t.Errorf("event order = %v, want input then before_agent_start", order)
+	}
+
+	// A handler that deals with the prompt itself stops the run before
+	// the model is called.
+	provider2 := &fakeProvider{responses: []llm.Message{{Content: "should not run"}}}
+	ag2, _, bus2 := newTestAgent(t, provider2)
+	bus2.On(ext.EventInput, func(e *ext.Event) error {
+		e.Cancel = true
+		e.BlockReason = "handled by a test"
+		return nil
+	})
+	res, err := ag2.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Cancelled {
+		t.Error("expected the run to be cancelled")
+	}
+	if len(provider2.requests) != 0 {
+		t.Errorf("the model was called %d times, want 0", len(provider2.requests))
+	}
+}
+
 func TestTurnEndCanInjectMessages(t *testing.T) {
 	provider := &fakeProvider{responses: []llm.Message{{Content: "first"}, {Content: "second"}}}
 	ag, _, bus := newTestAgent(t, provider)

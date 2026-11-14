@@ -139,9 +139,9 @@ pi 一样，改字段就行；**跨进程就没法改字段了**——harness �
 | | pi（进程内扩展） | auto-harness（进程扩展） |
 |---|---|---|
 | 提问方式 | handler 直接收事件对象 | JSON-RPC 请求 `event.consult` |
-| 裁决载体 | 返回值 `{block, reason, terminate}` | 回答体 `{block, reason}` / `{cancel}` |
+| 裁决载体 | 返回值 `{block, reason, terminate}` | 回答体 `{block, reason}` / `{cancel}` / `{text}`（input） |
 | 谁被问 | 所有注册了这个事件的扩展 | manifest 里声明了 `consults` 的扩展 |
-| 答不上来 | 抛异常 → **拦下**（fail-closed） | 不回答/报错/超时 → **拦下**（fail-closed） |
+| 答不上来 | 抛异常 → **拦下**（fail-closed） | 不回答/报错/超时 → **拦下**（fail-closed）；`input` 例外，保持原样 |
 | 扩展卡住 | 挂住整个 harness | 5 秒超时，拦下 |
 
 失败策略两边一致，都是 **fail-closed**：pi 文档原话是 "gate handlers should fail closed
@@ -149,7 +149,8 @@ when their safety decision cannot be made"，`tool_call` 出错就拦工具，`u
 就拦命令。auto-harness 沿用这个策略，但多了两层保障——**等待有上限**（pi 的进程内
 handler 卡住会把 harness 一起卡住，这里 5 秒就放手）和**没声明就不问**（扩展要在
 manifest 里写 `"consults": ["tool_call"]` 才会被问到；没声明的扩展它的沉默不是拒绝，
-不然通道出现之前写的扩展会把每一次工具调用都弄挂）。
+不然通道出现之前写的扩展会把每一次工具调用都弄挂）。唯一的例外是 `input`：它是改写
+不是门，算不出来就用用户的原话，否则一个坏扩展会吃掉每条消息。
 
 **4. 被否决的调用不再问用户。** pi 的 `tool_call` 和权限层是两条独立的路，扩展否决
 之后权限层照样问用户。auto-harness 让权限层看到 `e.Block` 就跳过——用户不会为一
@@ -183,9 +184,20 @@ auto-harness 的 provider 挂钩不在事件总线上，而在 `llm.Hooks`（`Be
 `BeforeRequest` / `AfterResponse`）——它们服务的是 HTTP 层（改头、改请求体、读响应），
 事件总线上那份是给扩展看的生命周期，混在一起反而两种都难用。
 
-**8. `input` 事件声明了但没发。** `ext.EventInput` 在事件表里，注释写着"改写/接管
-输入"，但实际上没有任何地方发它——REPL 的输入路径没走事件总线。这是个已知缺口，
-不是设计选择。
+**8. `input` 事件的时机不同：pi 在 skill 展开之前，auto-harness 在之后。**
+两边要解决的问题一样，裁决的写法不同：pi 的 handler 返回
+`{action:"continue"|"transform"|"handled"}`，auto-harness 沿用"改事件字段"——
+改 `e.Text` 就是 transform，置 `e.Cancel` 就是 handled。auto-harness 在
+`Agent.Run` 开头发这个事件，所有入口（REPL、一次性、JSON、RPC、skill、模板）都从
+那里过，所以没有哪条路径会漏掉它；代价是扩展看到的是**最终要发给模型的 prompt**，
+不是用户敲的那一行——`/skill:foo` 在 auto-harness 里就是一个命令，input 事件看到
+的是它展开后的全文（pi 看得到 `/skill:foo`，因为 pi 先查扩展命令、再发 input、最后
+才展开 skill）。pi 的 `images` 和 `streamingBehavior` 字段 auto-harness 也没有：
+它没有图片输入，也没有"边流式边发"的输入模型。
+
+这个事件和 `before_agent_start` 有重叠，区别是三处：input 先发；载荷是一行文本而
+不是 `llm.Message`；以及进程扩展**能**被问到 input（`before_agent_start` 不在被问
+之列）。
 
 ## 快速开始
 
@@ -406,7 +418,7 @@ handler 签名 `func(e *ext.Event) error`，按注册顺序同步执行；出错
 | `tool_execution_start` / `tool_execution_update` / `tool_result` / `tool_execution_end` | 工具执行生命周期 | — |
 | `context` | 发给 Provider 前 | 替换 `e.Messages`（上下文改写） |
 | `session_before_compact` / `session_compact` | 压缩历史 | 提供 `e.Messages` 扮演压缩器 |
-| `input` | 用户输入 | 改写/接管输入 |
+| `input` | 每次 Run 开始、prompt 交给模型之前 | 改 `e.Text` 改写；`e.Cancel` 表示扩展已处理这行，不跑 |
 | `user_bash` | `!` 快捷执行 shell 命令前 | `e.Block` + `e.BlockReason` 拦截；携带 `e.BashCommand` 和 `e.ExcludeFromContext` |
 
 ### 进程扩展（任何语言）
@@ -421,34 +433,37 @@ harness → 扩展: {"id":1,"method":"manifest","params":null}
 扩展 → harness: {"id":1,"result":{"name":"demo","tools":[{"name":"demo_echo",...}]}}
 harness → 扩展: {"id":2,"method":"tool.execute","params":{"name":"demo_echo","arguments":{...}}}
 扩展 → harness: {"id":2,"result":{"content":"...","is_error":false}}
-扩展 → harness: {"method":"event","params":{"event":"input","text":"..."}}
+扩展 → harness: {"method":"event","params":{"event":"demo_started","text":"..."}}
 ```
 
 扩展握手时返回自己的 manifest（名字 + 工具列表），harness 把这些工具注册成和内置
 工具完全一样的工具；模型调用时，harness 把调用转发给子进程并把结果送回模型。扩展
-也可以主动推送事件到 harness 的事件总线。
+也可以主动推送事件到 harness 的事件总线，事件名用内置的或自定义的都行。注意这是
+**扩展往 harness 推**的方向，和下面 harness 主动发出的 `input` 事件是两回事。
 
 #### 反向通道：harness 问扩展
 
 `event` 是扩展往 harness 推事件的方向。反方向是 harness **问**扩展：harness 在
-真正动手之前问一句"这件事允许吗"，扩展可以否决。
+真正动手之前问一句"这件事允许吗"，扩展可以否决；对 prompt 还能给出一段替代文本。
 
 ```
 harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_call","toolCall":{"id":"c1","name":"bash","arguments":{"command":"rm -rf /"}}}}
 扩展 → harness: {"id":3,"result":{"block":true,"reason":"不允许"}}
 ```
 
-被问的事件有三个，它们是内核真正要做决定的三件事：
+被问的事件有四个，它们是内核真正要做决定的地方：
 
-| 事件 | 时机 | 否决的效果 |
+| 事件 | 时机 | 回答的效果 |
 |------|------|-----------|
-| `tool_call` | 工具执行之前 | 工具不执行，原因作为错误结果回到模型 |
-| `user_bash` | `!` 快捷执行命令之前 | 命令不执行 |
-| `session_before_compact` | 压缩历史之前 | `cancel` 为真时放弃这次压缩 |
+| `tool_call` | 工具执行之前 | `block`：工具不执行，原因作为错误结果回到模型 |
+| `user_bash` | `!` 快捷执行命令之前 | `block`：命令不执行 |
+| `input` | 每次 Run 开始、prompt 交给模型之前 | `text`：替换 prompt；`cancel`：扩展自己处理了这行，不跑 |
+| `session_before_compact` | 压缩历史之前 | `cancel`：放弃这次压缩 |
 
 请求带 `toolCall`（含模型原始的 arguments）、`bashCommand`、`text`、`data`，扩展
 拿到的是工具本身会看到的原始参数。回答是 `{"block":true,"reason":"..."}`；
-`session_before_compact` 也可以答 `{"cancel":true}`。
+`session_before_compact` 和 `input` 也可以答 `{"cancel":true}`，`input` 还能答
+`{"text":"..."}` 来改写 prompt。
 
 扩展要在 manifest 里声明它想被问到哪些事件：
 
@@ -458,16 +473,19 @@ harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_cal
 
 两个细节：
 
-- **答不上来就拦下。** 扩展不回答、报错或者超时（5 秒），这次操作**不执行**——
-  和 pi 的 gate handler 一样（pi 文档原话是 "gate handlers should fail closed when
-  their safety decision cannot be made"，`tool_call` 出错就拦工具，`user_bash` 出错就
-  拦命令）。一个坏掉的策略扩展不能变成一扇开着的门。这里比 pi 多一层保障：pi 的
-  进程内 handler 卡住会把 harness 一起卡住，这里有 5 秒上限。
+- **答不上来就拦下，`input` 除外。** 扩展不回答、报错或者超时（5 秒），这次操作
+  **不执行**——和 pi 的 gate handler 一样（pi 文档原话是 "gate handlers should fail
+  closed when their safety decision cannot be made"，`tool_call` 出错就拦工具，
+  `user_bash` 出错就拦命令）。一个坏掉的策略扩展不能变成一扇开着的门。
+  `input` 是这条规则的例外：它是改写不是门，算不出来的改写有一个安全默认值，就是
+  用户原来那句话，所以它答不上来时 prompt 保持原样——在那里 fail-closed 等于让一个
+  坏扩展吃掉每一条消息。这里比 pi 多一层保障：pi 的进程内 handler 卡住会把 harness
+  一起卡住，这里有 5 秒上限。
 - **没声明就不问。** manifest 里没写 `consults` 的扩展根本不会被问到，所以它的沉默
   不是拒绝——不然通道出现之前写的扩展会把每一次工具调用都弄挂。
 
-进程内扩展（Go 写的）用同一个事件总线，`e.Block` / `e.BlockReason` 直接就位；
-子进程扩展则多走一次 JSON-RPC。
+进程内扩展（Go 写的）用同一个事件总线，改 `e.Block` / `e.BlockReason`（门）或
+`e.Text` / `e.Cancel`（prompt）就直接生效；子进程扩展则多走一次 JSON-RPC。
 
 可执行文件放在 `~/.harness/extensions/`、`<项目>/.harness/extensions/` 或
 `config.json` 的 `extension_dirs` 里（目录内的可执行文件都会被发现）。完整示例见
@@ -1139,7 +1157,7 @@ export OPENCODE_API_KEY=<你的 key>
 go test -tags e2e -timeout 600s -v ./e2e/
 ```
 
-覆盖：文本补全、bash 工具调用闭环、文件工具读写改往返、会话持久化与恢复、上下文压缩后信息保真、推理流透传且不污染转录、工具失败后的恢复、上下文超时中止、进程扩展工具、进程扩展否决工具调用（`event.consult` 反向通道：否决、答不上来拦下、没声明就不问）、MCP 工具、MCP resources、会话分叉与分支、权限拦截与放行、遥测落盘、OTLP 投递、Prometheus remote write 投递、工具渲染器接管呈现、`!` 快捷（含 `!!` 不进上下文）、文件变更队列串行化、Prompt 模板参数替换、项目上下文文件（AGENTS.md / SYSTEM.md）、Skills（渐进披露、模型自己读 SKILL.md、`/skill:name` 显式调用、参数传递、`disable-model-invocation` 隐藏、skill 不能自己执行命令）、RPC 模式（子进程协议：prompt 出答案、状态与历史、bash 命令与退出码、未知命令不毁会话、skill 走 RPC 也生效、关掉 stdin 后仍等运行结束）、JSON 输出模式（会话头在前、事件流完整、增量拼出答案、工具调用与结果在流上、非法模式值报错）。
+覆盖：文本补全、bash 工具调用闭环、文件工具读写改往返、会话持久化与恢复、上下文压缩后信息保真、推理流透传且不污染转录、工具失败后的恢复、上下文超时中止、进程扩展工具、进程扩展否决工具调用（`event.consult` 反向通道：否决、答不上来拦下、没声明就不问）、进程扩展改写 prompt（`input` 反向通道：改写后的话真的到了模型那里）、MCP 工具、MCP resources、会话分叉与分支、权限拦截与放行、遥测落盘、OTLP 投递、Prometheus remote write 投递、工具渲染器接管呈现、`!` 快捷（含 `!!` 不进上下文）、文件变更队列串行化、Prompt 模板参数替换、项目上下文文件（AGENTS.md / SYSTEM.md）、Skills（渐进披露、模型自己读 SKILL.md、`/skill:name` 显式调用、参数传递、`disable-model-invocation` 隐藏、skill 不能自己执行命令）、RPC 模式（子进程协议：prompt 出答案、状态与历史、bash 命令与退出码、未知命令不毁会话、skill 走 RPC 也生效、关掉 stdin 后仍等运行结束）、JSON 输出模式（会话头在前、事件流完整、增量拼出答案、工具调用与结果在流上、非法模式值报错）。
 
 未设置 key 时这些测试自动跳过（`t.Skip`），所以 CI 上安全。
 
@@ -1169,7 +1187,7 @@ go test -tags e2e -timeout 600s -v ./e2e/
 - **MCP 工具接入**（[mcp/](mcp/)）：Model Context Protocol 客户端——stdio 子进程与 streamable HTTP 两种传输、`initialize` 握手与能力协商、`tools/list` 分页发现、`tools/call` 调用、工具以 `mcp__<server>__<tool>` 命名桥接进 `tools.Registry`；`mcp.json` 配置读取与用户级/项目级合并、`-mcp-list` 与 `/mcp` 命令；一个 server 失败不影响其他
 - **会话树与分叉**（[session/tree.go](session/tree.go)、[session/fork.go](session/fork.go)）：会话文件升级为树格式（entry 带 `id`/`parentId`），`/tree` 列出并切换分支（模型上下文随分支切换），`/fork` 从指定用户消息分叉出独立会话文件、`/clone` 复制当前分支；当前位置（`leaf_pointer`）持久化，重载会话能回到正在走的分支；压缩写成 `compaction` entry（摘要替代被压缩的消息，原文保留在文件里）；旧 v1 线性格式加载时自动迁移
 - **扩展动态加载与热重载**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)、[ext/scope.go](ext/scope.go)）：进程扩展协议（stdio 上的 JSON-RPC，扩展可用任何语言写）、manifest 握手、工具桥接、事件转发、扩展发现（`~/.harness/extensions`、项目目录、`config.json` 的 `extension_dirs`）；`/reload` 按 pi 语义重载（`session_shutdown` → 撤销注册 → 重新 `Setup` → `session_start`），注册项由 harness 自动记录并撤销，扩展只需实现 `ext.Teardown` 释放子进程等资源
-- **扩展的反向通道（`event.consult`）**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)）：扩展原来只能往 harness 推事件，没法否决 harness 要做的事——它能提供工具，却拦不住一次调用。补一条 host→extension 的请求通道：harness 在动手之前问一句「这件事允许吗」，扩展答 `{"block":true,"reason":"..."}` 就否决，问的是内核真正要做决定的三件事（`tool_call` / `user_bash` / `session_before_compact`）。失败策略沿用 pi 的 **fail-closed**（"gate handlers should fail closed when their safety decision cannot be made"）——答不上来就拦下，坏掉的策略扩展不能变成一扇开着的门；比 pi 多两层保障：**等待有上限**（pi 的进程内 handler 卡住会挂住 harness，这里 5 秒放手）和**没声明就不问**（manifest 里写 `"consults": [...]` 才被问到，没声明的扩展它的沉默不算拒绝）。另外**已被否决的调用不再去问用户**（权限层看到 `e.Block` 就跳过）。进程内扩展走同一个事件总线用 `e.Block`，子进程扩展多走一次 JSON-RPC，两边语义一致
+- **扩展的反向通道（`event.consult`）**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)）：扩展原来只能往 harness 推事件，没法否决 harness 要做的事——它能提供工具，却拦不住一次调用。补一条 host→extension 的请求通道：harness 在动手之前问一句「这件事允许吗」，扩展答 `{"block":true,"reason":"..."}` 就否决，问的是内核真正要做决定的四件事（`tool_call` / `user_bash` / `input` / `session_before_compact`），其中 `input` 除了否决还能用 `{"text":"..."}` 改写 prompt。失败策略沿用 pi 的 **fail-closed**（"gate handlers should fail closed when their safety decision cannot be made"）——答不上来就拦下，坏掉的策略扩展不能变成一扇开着的门；`input` 是唯一的例外，改写算不出来就保持原样（否则坏扩展会吃掉每条消息）；比 pi 多两层保障：**等待有上限**（pi 的进程内 handler 卡住会挂住 harness，这里 5 秒放手）和**没声明就不问**（manifest 里写 `"consults": [...]` 才被问到，没声明的扩展它的沉默不算拒绝）。另外**已被否决的调用不再去问用户**（权限层看到 `e.Block` 就跳过）。进程内扩展走同一个事件总线用 `e.Block`，子进程扩展多走一次 JSON-RPC，两边语义一致
 - **TUI 差分渲染**（[tui/](tui/)）：帧差分只重写变化的行、CSI 2026 同步输出防闪烁、ANSI 感知的显示宽度（含 CJK 宽字符）、Component 体系（Text/Container/VStack/HStack/Transcript/Editor）、主屏与备用屏两种渲染器。`-tui` 启用；模型输出流式更新单行，编辑器行不抖动
 - **上下文压缩**：内置 LLM 摘要压缩器（`agent.NewSummarizer`），REPL `/compact` 直接可用；扩展仍可通过 `session_before_compact` 钩子接管（钩子优先）
 - **推理透传**：OpenAI 兼容流的 `reasoning_content`、Anthropic 流的 `thinking` 块都会作为 thinking 增量流向 UI（`-show-thinking` 显示），且不会污染转录内容。**同一个 chunk 同时带 reasoning 和正文时，两个都要出来**——早期实现遇到 reasoning 就直接 return，正文被整段吞掉，于是模型的回答缺了开头几个字（`HARNESS_SKILL_HIDDEN` 变成 `KILL_HIDDEN`）；现在多出来的事件进队列，下一次 `Recv` 取出来
