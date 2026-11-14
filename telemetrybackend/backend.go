@@ -158,4 +158,4 @@ func defaultScope() Scope {
 
 // Version is the harness's version, reported in the OTLP resource and
 // scope.
-var Version = "0.1.0"
+var Version = "0.1.1"
