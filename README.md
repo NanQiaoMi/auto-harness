@@ -175,7 +175,7 @@ auto-harness 的 `/fork` 和 `/clone` 都从某个 entry 开始，所以用 `rea
 
 **7. 事件集：auto-harness 多的一个，pi 多的是十八个。** auto-harness 有 pi 没有的
 `request_start`（一次模型请求的事实：provider / model / 工具数，用来测量单次请求而
-不改 provider）。pi 多出来的 18 个大致分四类：**信任审批**（`project_trust`）、
+不改 provider）。pi 多出来的 17 个大致分三类：
 **provider 挂钩**（`before_provider_headers` / `before_provider_request` /
 `after_provider_response` / `provider_stream_event`）、**UI 与选择**
 （`ui_prompt_start` / `ui_prompt_end` / `model_select` / `thinking_level_select` /
@@ -201,6 +201,17 @@ auto-harness 的 provider 挂钩不在事件总线上，而在 `llm.Hooks`（`Be
 这个事件和 `before_agent_start` 有重叠，区别是三处：input 先发；载荷是一行文本而
 不是 `llm.Message`；以及进程扩展**能**被问到 input（`before_agent_start` 不在被问
 之列）。
+
+**9. 项目信任：顺序照抄 pi，但决定者只能是进程内扩展。** pi 的 `project_trust` 由
+用户级/全局/CLI 扩展处理（项目自己的扩展这时还没加载），返回
+`{trusted:"yes"|"no"|"undecided", remember}`；auto-harness 照抄判定顺序（扩展 →
+`trust.json` → `trust_project` 配置 → 问用户）和 `remember` 语义，但**进程扩展
+（Python 之类）不参与**：它们在信任范围内先加载了，consult 通道本来可以问，但信任
+决定要发生在项目资源装配之前，这条路上只开放给进程内扩展。另一个差别是
+`defaultProjectTrust` 这个三态开关 auto-harness 没有——`trust_project: true` 就是
+"总是信任"，没配置时交互式问、非交互式拒绝。信任覆盖的范围比 pi 文档点名的
+（`.pi` 和 `.agents/skills`）更明确：项目级扩展、MCP server、权限规则、prompt 模板、
+skill 都算，`AGENTS.md` / `SYSTEM.md` 不算（它们是给模型的指示，不会自己运行）。
 
 ## 快速开始
 
@@ -337,6 +348,7 @@ use /tree <index> to switch to a branch
     "~/.harness/extensions"
   ],
   "extension_command": "",          // 单个进程扩展命令，如 "python3 ext.py"
+  "trust_project": false,           // 总是信任项目本地资源（默认交互式问、非交互式拒绝）
   "providers": [                    // 额外 provider：/model 可跨 provider 切换
     {
       "name": "go-anthropic",
@@ -422,6 +434,7 @@ handler 签名 `func(e *ext.Event) error`，按注册顺序同步执行；出错
 | `context` | 发给 Provider 前 | 替换 `e.Messages`（上下文改写） |
 | `session_before_compact` / `session_compact` | 压缩历史 | 提供 `e.Messages` 扮演压缩器；`e.Cancel` 放弃这次压缩 |
 | `session_before_switch` / `session_before_fork` / `session_before_tree` | 换会话、分叉、`/tree` 导航**之前** | `e.Cancel` 取消，操作不发生；携带 `e.Reason`（`new` / `fork` / `clone`）、`e.EntryID`（分叉点或树目标，当前分支在 `e.Data["from"]`） |
+| `project_trust` | 项目资源加载之前 | `e.Trusted` = `"yes"` / `"no"` 定下决定（留空交给内置流程）；`e.Remember` 写进 `trust.json`；`e.Cwd` 是项目目录 |
 | `input` | 每次 Run 开始、prompt 交给模型之前 | 改 `e.Text` 改写；`e.Cancel` 表示扩展已处理这行，不跑 |
 | `user_bash` | `!` 快捷执行 shell 命令前 | `e.Block` + `e.BlockReason` 拦截；携带 `e.BashCommand` 和 `e.ExcludeFromContext` |
 
@@ -475,6 +488,9 @@ harness → 扩展: {"id":3,"method":"event.consult","params":{"event":"tool_cal
 三个会话事件的问在**任何副作用之前**：取消之后不会留下写了一半的分叉文件，叶子也
 不会已经移走才发现被拒——REPL 的 `/fork`、`/tree` 打一行 `cancelled: <原因>` 就回到
 提示符，RPC 的 `new_session` / `fork` 回一条带原因的失败响应。
+
+`project_trust` 不在这七个里：信任决定发生在扩展进程装配之前，只有进程内扩展能参与
+（见设计差异第 9 条）。
 
 扩展要在 manifest 里声明它想被问到哪些事件：
 
@@ -827,7 +843,7 @@ stdout 归事件流所有：模型文本、工具提示、诊断全走 stderr。
 把它们的工具注册成普通工具，模型像调用内置工具一样调用它们。
 
 **配置**：`~/.harness/mcp.json`（用户级）和 `<项目>/.harness/mcp.json`（项目级，
-需 `trust_project`）——格式与其他 MCP 客户端一致：
+项目被信任时读取，见「项目信任」）——格式与其他 MCP 客户端一致：
 
 ```jsonc
 {
@@ -886,6 +902,31 @@ SSE 传输不支持。
 ./bin/harness -mcp-list   # 用 ~/.harness/mcp.json 里的配置连接
 ```
 
+## 项目信任（[cmd/harness/trust.go](cmd/harness/trust.go)）
+
+一个克隆下来的仓库可以自带可执行扩展、MCP server、权限规则、prompt 模板和 skill。
+这些都是项目级资源，**在信任判定之前一个都不加载**——不然打开一个陌生仓库就等于
+运行它的代码。
+
+判定顺序（对齐 pi 的 `project_trust`）：
+
+1. **扩展**：用户级/内置扩展先加载，然后发 `project_trust` 事件。handler 把
+   `e.Trusted` 设成 `"yes"` / `"no"` 就算定了，`e.Remember` 让它写进 `trust.json`。
+   项目自己的扩展此时还没加载——这正是判定要排在它们前面的原因。
+2. **保存过的决定**：`~/.harness/trust.json` 里该目录的 `"yes"` / `"no"`。
+3. **`config.json` 的 `trust_project: true`**：对每个项目都不问、直接信任。
+4. **问用户**：交互式会话列出项目会加载什么，回答 `[y/N]` 并被记住。非交互
+   （`-print`、JSON、RPC，或 stdin 不是终端）没有人可问，**不加载**项目资源，并在
+   stderr 打一行说明——和权限层"无人可问就拒绝"是同一条规则。
+
+`/trust` 查看当前决定和项目资源，`/trust yes|no` 保存决定，`/trust reset` 忘掉、
+下次再问。决定按**绝对工作目录**记录，保存的决定和 `trust_project` 在下次启动时
+生效（资源是在启动时装配的）。
+
+项目上下文文件（`AGENTS.md` / `SYSTEM.md`）不参与信任判定：它们是给模型的指示，
+不会自己运行。信任只决定"项目自己的配置要不要读"，不决定"模型能做什么"——权限层
+和沙箱照常对每一次调用生效。
+
 ## 权限与沙箱
 
 pi 的内核没有内置权限系统——「以什么权限读写执行」是留给扩展的一层空白。
@@ -906,7 +947,7 @@ harness 沿用这个设计：权限守卫是一个扩展，挂在 `tool_call` �
 会作为工具错误结果回给模型，模型能看到「为什么被拒」并换一条路。
 
 **配置**：`~/.harness/permissions.json`（用户级）和
-`<项目>/.harness/permissions.json`（项目级，需 `trust_project`）：
+`<项目>/.harness/permissions.json`（项目级，项目被信任时读取）：
 
 ```jsonc
 {
@@ -1196,6 +1237,7 @@ go test -tags e2e -timeout 600s -v ./e2e/
 - **遥测契约**（[telemetry/](telemetry/)、[telemetryext/](telemetryext/)）：对齐 `pi-telemetry` 的厂商中立契约——`Context.StartSpan` 围绕回调开 span（回调同步、恰好一次、错误原样返回，契约里没有公开的 `end()`，Go 用 `telemetry.Deferred` 在自己的 goroutine 上表达 pi 的 promise 语义）、`Metrics`/`Propagation` 作为适配器的可选能力挂在每个 context 上、`Store` 读回 trace 与 metric 行；`NoopContext` 是没有遥测时的惰性实现，`MemoryContext` 是内存参考适配器；schema 是纯数据（span / event / metric / 属性类型 / 基数 / 敏感标记），harness 自带 `pi.harness.*` 词汇表（session / request / tool / compaction + 四个 metric）；采集器是又一个扩展，挂在事件总线上，靠事件开/关 span；JSONL 导出器按 schema 脱敏；隐私策略由测试守住——prompt、工具参数、工具输出、文件路径一律不进属性，只有名字、计数、耗时、token 数成为属性；`config.json` 的 `telemetry` / `telemetry_path` 开关与 `/telemetry` 命令
 
 - **权限与沙箱**（[perm/](perm/)、[sandbox/](sandbox/)）：权限守卫作为扩展挂在 `tool_call` 钩子上（内核仍无内置权限，遵循 pi 的设计）；规则按「内置 deny 底线 → 首个命中即决定」判定，来源顺序为 config.json → 用户级 → 项目级 → 内置默认；allow/ask/deny 三态，ask 在无交互会话时默认拒绝（fail-safe）；`permissions.json` 用户级/项目级配置、`/permissions` 查看与 `/permissions allow <path>`；沙箱用 macOS Seatbelt 限制 shell（写白名单 + 读黑名单 + 网络开关），不可用时明确标注未受控
+- **项目信任**（[cmd/harness/trust.go](cmd/harness/trust.go)）：项目自己的扩展、MCP server、权限规则、prompt 模板和 skill 在信任判定之前一个都不加载——克隆一个陌生仓库不该等于运行它的代码。判定顺序对齐 pi 的 `project_trust`：信任范围内的扩展先决定（`e.Trusted` + `e.Remember`）→ `~/.harness/trust.json` 里保存的决定 → config 的 `trust_project: true`（总是信任）→ 问用户；非交互会话没有人可问，**不加载**并在 stderr 说明，和权限层"无人可问就拒绝"同一条规则。`/trust` 查看、`/trust yes|no` 保存、`/trust reset` 忘掉；决定按绝对工作目录记录，和 pi 一样在下次启动生效。项目上下文文件（`AGENTS.md` / `SYSTEM.md`）不算项目资源：它们是给模型的指示，不会自己运行
 - **MCP 工具接入**（[mcp/](mcp/)）：Model Context Protocol 客户端——stdio 子进程与 streamable HTTP 两种传输、`initialize` 握手与能力协商、`tools/list` 分页发现、`tools/call` 调用、工具以 `mcp__<server>__<tool>` 命名桥接进 `tools.Registry`；`mcp.json` 配置读取与用户级/项目级合并、`-mcp-list` 与 `/mcp` 命令；一个 server 失败不影响其他
 - **会话树与分叉**（[session/tree.go](session/tree.go)、[session/fork.go](session/fork.go)）：会话文件升级为树格式（entry 带 `id`/`parentId`），`/tree` 列出并切换分支（模型上下文随分支切换），`/fork` 从指定用户消息分叉出独立会话文件、`/clone` 复制当前分支；当前位置（`leaf_pointer`）持久化，重载会话能回到正在走的分支；压缩写成 `compaction` entry（摘要替代被压缩的消息，原文保留在文件里）；旧 v1 线性格式加载时自动迁移
 - **扩展动态加载与热重载**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)、[ext/scope.go](ext/scope.go)）：进程扩展协议（stdio 上的 JSON-RPC，扩展可用任何语言写）、manifest 握手、工具桥接、事件转发、扩展发现（`~/.harness/extensions`、项目目录、`config.json` 的 `extension_dirs`）；`/reload` 按 pi 语义重载（`session_shutdown` → 撤销注册 → 重新 `Setup` → `session_start`），注册项由 harness 自动记录并撤销，扩展只需实现 `ext.Teardown` 释放子进程等资源

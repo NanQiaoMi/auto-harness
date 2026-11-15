@@ -38,7 +38,7 @@ type mcpSetup struct {
 //
 // A server that fails to connect is reported but does not stop the
 // others.
-func loadMCPServers(ctx context.Context, cfg *config.Config, projectRoot string, registry *tools.Registry) *mcpSetup {
+func loadMCPServers(ctx context.Context, cfg *config.Config, projectRoot string, registry *tools.Registry, trusted bool) *mcpSetup {
 	setup := &mcpSetup{
 		manager:     mcp.NewManager(registry),
 		sources:     map[string]string{},
@@ -50,8 +50,11 @@ func loadMCPServers(ctx context.Context, cfg *config.Config, projectRoot string,
 		return setup
 	}
 
-	// The configuration files.
-	merged, err := mcp.LoadConfig(setup.userPath, setup.projectPath, cfg.TrustProject)
+	// The configuration files. The project's loads only when the
+	// project is trusted; when the project file is the user's own, it
+	// was already read as the user's.
+	trustProject := (trusted || cfg.TrustProject) && setup.projectPath != setup.userPath
+	merged, err := mcp.LoadConfig(setup.userPath, setup.projectPath, trustProject)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[warn] mcp config: %v\n", err)
 	}

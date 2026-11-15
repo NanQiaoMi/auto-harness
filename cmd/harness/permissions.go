@@ -40,7 +40,7 @@ type permSetup struct {
 // interactive says whether a user is present to approve a call. When it
 // is false the calls that need confirmation are blocked: pi's rule is
 // to fail safe when there is no UI to confirm.
-func loadPermissions(ctx context.Context, cfg *config.Config, projectRoot string, registry *tools.Registry, interactive bool) *permSetup {
+func loadPermissions(ctx context.Context, cfg *config.Config, projectRoot string, registry *tools.Registry, interactive bool, trusted bool) *permSetup {
 	setup := &permSetup{
 		userPath:    perm.DefaultUserPath(),
 		projectPath: perm.DefaultProjectPath(projectRoot),
@@ -51,7 +51,11 @@ func loadPermissions(ctx context.Context, cfg *config.Config, projectRoot string
 		return setup
 	}
 
-	set, err := perm.LoadConfig(setup.userPath, setup.projectPath, cfg.TrustProject)
+	// The project's rules load only when the project is trusted (or the
+	// config says to trust every project). When the project file is the
+	// user's own, it was already read as the user's.
+	trustProject := (trusted || cfg.TrustProject) && setup.projectPath != setup.userPath
+	set, err := perm.LoadConfig(setup.userPath, setup.projectPath, trustProject)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[warn] permissions: %v\n", err)
 		set = perm.Builtin()

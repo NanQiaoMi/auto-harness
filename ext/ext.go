@@ -77,6 +77,19 @@ const (
 	// the branch being left. A handler may cancel the move with Cancel.
 	EventSessionBeforeTree EventType = "session_before_tree"
 
+	// EventProjectTrust fires before a project's own resources load:
+	// its extensions, MCP servers, permission rules, prompt templates
+	// and skills.
+	//
+	// Only extensions from the trusted scope participate (the built-ins,
+	// the config's extension command and directories, and
+	// ~/.harness/extensions): a project's own extensions have not
+	// loaded yet, and must not, until the decision is made. A handler
+	// sets Trusted to "yes" or "no" to own the decision; leaving it
+	// empty lets the built-in resolution continue (saved decision,
+	// config, prompt). Remember persists the decision.
+	EventProjectTrust EventType = "project_trust"
+
 	// EventInput fires at the start of every run, with the prompt the
 	// agent is about to receive.
 	//
@@ -159,6 +172,17 @@ type Event struct {
 	// ExcludeFromContext reports that the command's output must not
 	// reach the model (the "!!" shortcut).
 	ExcludeFromContext bool
+
+	// Cwd is the project directory a trust decision is about
+	// (project_trust).
+	Cwd string
+	// Trusted is a project_trust handler's decision: "yes", "no", or
+	// empty for undecided. An undecided handler leaves the built-in
+	// resolution to continue.
+	Trusted string
+	// Remember asks the runtime to persist a trust decision, so the
+	// project is not asked about again.
+	Remember bool
 }
 
 // Request describes one model request.

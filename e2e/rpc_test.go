@@ -46,6 +46,13 @@ type rpcProcess struct {
 // in-process server, so the subprocess boundary is part of what is
 // being tested.
 func startRPC(t *testing.T, workdir string, extraArgs ...string) *rpcProcess {
+	return startRPCWithEnv(t, workdir, nil, extraArgs...)
+}
+
+// startRPCWithEnv starts the harness in RPC mode with extra environment
+// entries, used by the tests that need the project trusted: the mode is
+// non-interactive, so an untrusted project's resources do not load.
+func startRPCWithEnv(t *testing.T, workdir string, extraEnv []string, extraArgs ...string) *rpcProcess {
 	t.Helper()
 
 	key := apiKey(t)
@@ -59,7 +66,7 @@ func startRPC(t *testing.T, workdir string, extraArgs ...string) *rpcProcess {
 
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = workdir
-	cmd.Env = rpcEnv(t, key)
+	cmd.Env = append(rpcEnv(t, key), extraEnv...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("stdin pipe: %v", err)
@@ -91,13 +98,14 @@ func startRPC(t *testing.T, workdir string, extraArgs ...string) *rpcProcess {
 
 // rpcEnv returns the environment for a harness subprocess.
 //
-// The session directory is redirected to a temporary one, so a test
-// run never writes into the user's real sessions. The permissions are
-// disabled: the harness has no user to ask, and a blocked call would
-// only make the test flaky.
+// The home and the session directories are redirected to temporary
+// ones, so a test run never reads the user's own config or writes into
+// their sessions. The permissions are disabled: the harness has no user
+// to ask, and a blocked call would only make the test flaky.
 func rpcEnv(t *testing.T, key string) []string {
 	t.Helper()
 	return append(os.Environ(),
+		"HOME="+t.TempDir(),
 		"OPENAI_API_KEY="+key,
 		"OPENCODE_API_KEY="+key,
 		"HARNESS_SESSION_DIR="+filepath.Join(t.TempDir(), "sessions"),
@@ -446,8 +454,30 @@ When you are asked to describe a fruit's taste, reply with exactly: HARNESS_RPC_
 	}
 
 	// The harness runs in the skill's directory, so it finds the
-	// project's skills.
-	process := startRPC(t, dir)
+	// project's skills — once the project is trusted. The RPC mode is
+	// non-interactive, so the trust decision has to be a saved one: the
+	// subprocess is given a home whose trust file already says yes. The
+	// key is the resolved path, because that is the form the harness
+	// derives from its working directory.
+	home := t.TempDir()
+	trustDir := filepath.Join(home, ".harness")
+	if err := os.MkdirAll(trustDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve the project directory: %v", err)
+	}
+	trust, err := json.Marshal(map[string]any{
+		"projects": map[string]string{resolved: "yes"},
+	})
+	if err != nil {
+		t.Fatalf("marshal the trust file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(trustDir, "trust.json"), trust, 0o644); err != nil {
+		t.Fatalf("write the trust file: %v", err)
+	}
+	process := startRPCWithEnv(t, dir, []string{"HOME=" + home})
 	defer process.close()
 
 	process.send(map[string]any{

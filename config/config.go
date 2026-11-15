@@ -50,7 +50,10 @@ type Config struct {
 	MCPServers map[string]mcp.ServerConfig `json:"mcp_servers,omitempty"`
 	// NoMCP disables MCP for this run.
 	NoMCP bool `json:"no_mcp,omitempty"`
-	// TrustProject allows the project-level mcp.json to be read.
+	// TrustProject trusts the project's local resources — its
+	// extensions, MCP servers, permission rules, skills and prompt
+	// templates — without asking. It is the "always trust" switch; the
+	// per-project answers live in ~/.harness/trust.json.
 	TrustProject bool `json:"trust_project,omitempty"`
 	// Permissions configures the permission rules. The rules are
 	// merged with the ones in ~/.harness/permissions.json and

@@ -40,7 +40,7 @@ type skillSetup struct {
 // sees for a name the project defines; the user's own directory is the
 // fallback for the names the project does not use. That is the same
 // precedence the permission layer gives the user's rules.
-func loadSkills(cfg *config.Config, workdir string) *skillSetup {
+func loadSkills(cfg *config.Config, workdir string, trusted bool) *skillSetup {
 	setup := &skillSetup{
 		registry: skills.NewRegistry(),
 		out: func(line string) {
@@ -48,8 +48,20 @@ func loadSkills(cfg *config.Config, workdir string) *skillSetup {
 		},
 	}
 
+	// The project's skills are instructions the model would follow, so
+	// they wait for the trust decision like the project's code does.
+	skipped := map[string]bool{}
+	if !trusted {
+		for _, dir := range projectSkillDirs(workdir) {
+			skipped[dir.Path] = true
+		}
+	}
+
 	dirs := skills.Dirs(workdir, config.Dir())
 	for _, dir := range dirs {
+		if skipped[dir.Path] {
+			continue
+		}
 		found, diags := skills.LoadFromDirs([]skills.Dir{dir})
 		setup.diagnostics = append(setup.diagnostics, diags...)
 		if len(found) == 0 {

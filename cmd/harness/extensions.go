@@ -20,20 +20,69 @@ type extensionLoader struct {
 	projectRoot string
 	// cfg supplies the extension directories and commands.
 	cfg *config.Config
+	// trusted allows the project-local extension dir to load. It is
+	// false until the project trust decision is made.
+	trusted bool
 }
 
-// extensionDirs returns the directories scanned for process
-// extensions: the configured ones, then the global and project
-// defaults.
-func (l *extensionLoader) extensionDirs() []string {
+// trustedDirs returns the directories that load without a trust
+// decision: the configured ones and the user's own.
+func (l *extensionLoader) trustedDirs() []string {
 	var dirs []string
 	dirs = append(dirs, l.cfg.ExtensionDirs...)
 	home, err := os.UserHomeDir()
 	if err == nil {
 		dirs = append(dirs, filepath.Join(home, ext.GlobalExtensionsDir))
 	}
-	dirs = append(dirs, filepath.Join(l.projectRoot, ext.ProjectExtensionsDir))
 	return dirs
+}
+
+// projectDir is the project-local extension directory.
+func (l *extensionLoader) projectDir() string {
+	return filepath.Join(l.projectRoot, ext.ProjectExtensionsDir)
+}
+
+// extensionDirs returns the directories scanned for process
+// extensions: the trusted ones, then the project's own when the
+// project is trusted.
+func (l *extensionLoader) extensionDirs() []string {
+	dirs := l.trustedDirs()
+	if l.trusted {
+		project := l.projectDir()
+		already := false
+		for _, dir := range dirs {
+			if dir == project {
+				already = true
+				break
+			}
+		}
+		if !already {
+			dirs = append(dirs, project)
+		}
+	}
+	return dirs
+}
+
+// buildProject returns the project-local extensions for the second
+// load pass, after the trust decision. It returns nothing when the
+// project is untrusted, or when its extension directory is also one of
+// the user's own (a project that is the home directory) and therefore
+// already loaded.
+func (l *extensionLoader) buildProject() []ext.Extension {
+	if !l.trusted {
+		return nil
+	}
+	project := l.projectDir()
+	for _, dir := range l.trustedDirs() {
+		if dir == project {
+			return nil
+		}
+	}
+	var exts []ext.Extension
+	for _, path := range ext.DiscoverIn([]string{project}) {
+		exts = append(exts, ext.NewProcessExtension(path))
+	}
+	return exts
 }
 
 // build returns the extension list: built-ins first, then process

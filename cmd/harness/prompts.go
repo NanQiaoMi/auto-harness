@@ -43,7 +43,7 @@ type promptSetup struct {
 //
 // The context files come from the working directory: they describe the
 // project the agent is working in.
-func loadPrompts(cfg *config.Config, workdir string) *promptSetup {
+func loadPrompts(cfg *config.Config, workdir string, trusted bool) *promptSetup {
 	setup := &promptSetup{
 		registry: prompts.NewRegistry(),
 		files:    &projcontext.Instructions{},
@@ -53,14 +53,21 @@ func loadPrompts(cfg *config.Config, workdir string) *promptSetup {
 	}
 
 	// The project directory: the templates that belong to this
-	// project.
+	// project. They are the project's data, so they wait for the trust
+	// decision — unless this is also the user's own directory.
 	projectDir := filepath.Join(workdir, ".harness", "prompts")
 	// The user's own directory: the templates that follow them
 	// everywhere.
 	userDir := filepath.Join(config.Dir(), "prompts")
+	if projectDir == userDir {
+		trusted = true
+	}
 	// seen keeps a directory from being read twice.
 	seen := map[string]bool{}
 	for _, dir := range []string{projectDir, userDir} {
+		if !trusted && dir == projectDir {
+			continue
+		}
 		// The two directories can be the same one: a project that
 		// lives in the home directory is its own user directory. The
 		// templates must not be loaded twice.

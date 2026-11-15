@@ -193,7 +193,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// --- permissions and sandbox ----------------------------------
 	// The permission layer is an extension, like pi's: the kernel has
 	// no permission system of its own. A one-shot run has nobody to
 	// approve a call, so it fails safe there.
@@ -206,7 +205,38 @@ func main() {
 	// The JSON mode is one-shot like the print mode, so it is
 	// non-interactive for the same reason.
 	interactive := !*printMode && !*rpcMode && !jsonOutput && perm.IsTerminal(os.Stdin)
-	permSetup := loadPermissions(ctx, cfg, workdir(), registry, interactive)
+
+	// The REPL, the permission prompt and the trust prompt share one
+	// reader over stdin: several readers over the same stream would
+	// steal each other's input.
+	var lines perm.LineReader
+	if interactive {
+		lines = perm.NewLineReader(os.Stdin)
+	}
+
+	// --- extensions: the trusted scope first -----------------------
+	// The user's extensions load before the trust decision: they are
+	// trusted by definition, and they are the ones that can decide
+	// whether to trust the project.
+	extMgr := ext.NewManager(api)
+	loader := &extensionLoader{projectRoot: workdir(), cfg: cfg}
+	if err := extMgr.LoadAll(loader.build()...); err != nil {
+		// A broken extension must not stop the harness from starting.
+		fmt.Fprintf(os.Stderr, "[warn] %v\n", err)
+	}
+
+	// --- project trust ---------------------------------------------
+	// Nothing the project ships runs or loads before this decision: its
+	// extensions, MCP servers, permission rules, skills and prompt
+	// templates all wait for it.
+	trustSetup := resolveProjectTrust(cfg, workdir(), bus, interactive, trustPrompter(lines))
+	loader.trusted = trustSetup.decision.Trusted
+	if err := extMgr.LoadAll(loader.buildProject()...); err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] %v\n", err)
+	}
+
+	// --- permissions and sandbox ----------------------------------
+	permSetup := loadPermissions(ctx, cfg, workdir(), registry, interactive, trustSetup.decision.Trusted)
 
 	// The bash tool runs inside the sandbox when one is configured.
 	bashTool := tools.NewBashTool()
@@ -219,13 +249,8 @@ func main() {
 		}
 	}
 
-	extMgr := ext.NewManager(api)
-	loader := &extensionLoader{projectRoot: workdir(), cfg: cfg}
-	if err := extMgr.LoadAll(loader.build()...); err != nil {
-		// A broken extension must not stop the harness from starting.
-		fmt.Fprintf(os.Stderr, "[warn] %v\n", err)
-	}
-	// The permission guard joins the extension set, so it survives a
+	// The permission guard joins the extension set last, so it sees
+	// what every other handler decided about a call, and survives a
 	// reload like everything else.
 	if !cfg.NoPermissions {
 		if err := extMgr.Load(permSetup.guard); err != nil {
@@ -245,7 +270,7 @@ func main() {
 	// --- MCP servers ---------------------------------------------
 	// The servers' tools are registered like any other tool, so the
 	// model can call them without knowing about MCP.
-	mcpSetup := loadMCPServers(ctx, cfg, workdir(), registry)
+	mcpSetup := loadMCPServers(ctx, cfg, workdir(), registry, trustSetup.decision.Trusted)
 	defer mcpSetup.manager.Close()
 	for name, err := range mcpSetup.errors {
 		fmt.Fprintf(os.Stderr, "[warn] mcp %s: %v\n", name, err)
@@ -265,8 +290,8 @@ func main() {
 	// context files are the project's instructions; the skills are the
 	// instructions the model loads when a task matches. All three are
 	// optional and all three are data, not code.
-	promptSetup := loadPrompts(cfg, workdir())
-	skillSetup := loadSkills(cfg, workdir())
+	promptSetup := loadPrompts(cfg, workdir(), trustSetup.decision.Trusted)
+	skillSetup := loadSkills(cfg, workdir(), trustSetup.decision.Trusted)
 
 	ag := agent.New(agent.Config{
 		Provider: provider,
@@ -369,11 +394,11 @@ func main() {
 	// nothing else, so the model's text and the tool notices must not
 	// go there. The RPC server writes the records itself.
 	if *rpcMode {
-		runRPCMode(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, *quiet)
+		runRPCMode(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, *quiet)
 		return
 	}
 
-	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, *quiet, *tuiMode)
+	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, lines, *quiet, *tuiMode)
 }
 
 // workdir returns the current working directory, used to locate the
@@ -394,8 +419,8 @@ func sessionReason(resumed string) string {
 }
 
 // runREPL is the interactive loop.
-func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, quiet bool, tuiMode bool) {
-	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, &quiet)
+func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, lines perm.LineReader, quiet bool, tuiMode bool) {
+	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, &quiet)
 
 	// The prompt templates are slash commands like any other, so they
 	// live on the same registry. They are installed once here; the TUI
@@ -430,9 +455,13 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 	}
 
 	fmt.Printf("auto-harness %s — model %s (%s). /help for commands.\n", version, cfg.Model, cfg.Provider)
-	// The REPL and the permission prompt share one reader over stdin, so
-	// neither steals the other's input.
-	lines := perm.NewLineReader(os.Stdin)
+	// The REPL, the permission prompt and the trust prompt share one
+	// reader over stdin, so none of them steals another's input. The
+	// reader is created before the project loads, because the trust
+	// prompt may already have consumed a line.
+	if lines == nil {
+		lines = perm.NewLineReader(os.Stdin)
+	}
 	permSetup.setLineReader(lines)
 	scanner := perm.NewScanner(lines)
 	for {
@@ -491,8 +520,23 @@ func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line stri
 
 // registerBuiltinCommands wires the REPL's own slash commands through
 // the same registry extensions use.
-func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, quiet *bool) {
+func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, quiet *bool) {
 	registerTreeCommands(commands, &treeSession{sess: sess, ag: ag, dir: cfg.SessionDir, bus: bus})
+	commands.Register("trust", &ext.Command{
+		Description: "show or set the project trust decision",
+		Handler: func(ctx context.Context, args string) error {
+			if strings.TrimSpace(args) == "" {
+				trustSetup.report(func(line string) { fmt.Println(line) })
+				return nil
+			}
+			msg, err := trustSetup.apply(args)
+			if err != nil {
+				return err
+			}
+			fmt.Println(msg)
+			return nil
+		},
+	})
 	commands.Register("help", &ext.Command{
 		Description: "list available commands",
 		Handler: func(ctx context.Context, args string) error {
