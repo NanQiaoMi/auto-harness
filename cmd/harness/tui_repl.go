@@ -19,7 +19,7 @@ import (
 // runTUIREPL runs the interactive loop on the differential-rendering
 // screen: model output updates a single pending line, so only the changed
 // row is rewritten instead of scrolling the whole screen.
-func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, permSetup *permSetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, quiet bool) {
+func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, permSetup *permSetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, gitOut *commandOutput, quiet bool) {
 	theme := tui.DefaultTheme()
 
 	term := tui.NewProcessTerminal()
@@ -49,6 +49,9 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 	// Writing it to the transcript keeps the two from interleaving.
 	promptOut := tui.NewTranscriptWriter(transcript, screen.RequestRender)
 	permSetup.setPromptOutput(promptOut)
+	if gitOut != nil {
+		gitOut.Set(promptOut)
+	}
 
 	transcript.Appendf("auto-harness %s — model %s (%s). /help for commands.", version, cfg.Model, cfg.Provider)
 	transcript.Append("")
@@ -135,7 +138,7 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if err := handleCommand(ctx, commands, line); errors.Is(err, errExitREPL) {
+			if err := handleCommand(ctx, commands, line, promptOut, promptOut); errors.Is(err, errExitREPL) {
 				return
 			}
 			continue

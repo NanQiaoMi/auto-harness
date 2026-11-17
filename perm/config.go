@@ -148,6 +148,28 @@ func Builtin() *Set {
 				Builtin: true,
 			},
 			{
+				Name:    "git commands",
+				Tools:   []string{"git"},
+				Action:  ActionAsk,
+				Reason:  "Git commands can rewrite history, branches and the worktree",
+				Builtin: true,
+			},
+			{
+				Name:    "workspace checkpoint inspection",
+				Tools:   []string{"checkpoint"},
+				Args:    map[string]string{"action": `^list$`},
+				Action:  ActionAllow,
+				Reason:  "listing checkpoints does not change the workspace",
+				Builtin: true,
+			},
+			{
+				Name:    "workspace checkpoints",
+				Tools:   []string{"checkpoint"},
+				Action:  ActionAsk,
+				Reason:  "workspace checkpoints can restore or replace project files",
+				Builtin: true,
+			},
+			{
 				Name:    "mcp tools",
 				Tools:   []string{"mcp__*"},
 				Action:  ActionAsk,

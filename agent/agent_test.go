@@ -76,6 +76,97 @@ func newTestAgent(t *testing.T, provider llm.Provider) (*Agent, *tools.Registry,
 	return ag, reg, bus
 }
 
+type recordingCheckpointer struct {
+	names []string
+	fail  bool
+}
+
+func (c *recordingCheckpointer) BeforeTool(ctx context.Context, toolName string, args json.RawMessage) error {
+	c.names = append(c.names, toolName)
+	if c.fail {
+		return errors.New("snapshot failed")
+	}
+	return nil
+}
+
+func TestCheckpointerRunsOnlyBeforeMutatingTools(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Message{
+		{ToolCalls: []llm.ToolCall{
+			{ID: "r1", Name: "read-only", Arguments: json.RawMessage(`{}`)},
+			{ID: "w1", Name: "writer", Arguments: json.RawMessage(`{"value":"x"}`)},
+		}},
+		{Content: "done"},
+	}}
+	ag, reg, _ := newTestAgent(t, provider)
+	checkpoints := &recordingCheckpointer{}
+	ag.Checkpointer = checkpoints
+
+	var writerCalls int
+	if err := reg.Register(&tools.Tool{
+		Name:       "read-only",
+		ReadOnly:   true,
+		Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			return tools.Result{Content: "read"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&tools.Tool{
+		Name:       "writer",
+		Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			writerCalls++
+			return tools.Result{Content: "wrote"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ag.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if len(checkpoints.names) != 1 || checkpoints.names[0] != "writer" {
+		t.Fatalf("checkpoint calls = %v", checkpoints.names)
+	}
+	if writerCalls != 1 {
+		t.Fatalf("writer calls = %d", writerCalls)
+	}
+}
+
+func TestCheckpointerFailureBlocksMutatingTool(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Message{
+		{ToolCalls: []llm.ToolCall{
+			{ID: "w1", Name: "writer", Arguments: json.RawMessage(`{}`)},
+		}},
+		{Content: "done"},
+	}}
+	ag, reg, _ := newTestAgent(t, provider)
+	ag.Checkpointer = &recordingCheckpointer{fail: true}
+	called := false
+	if err := reg.Register(&tools.Tool{
+		Name:       "writer",
+		Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			called = true
+			return tools.Result{Content: "wrote"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ag.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("mutating tool ran after checkpoint failure")
+	}
+	history := ag.History()
+	if len(history) < 3 || history[2].Role != llm.RoleTool ||
+		!history[2].IsError || !strings.Contains(history[2].Content, "checkpoint failed") {
+		t.Fatalf("tool result = %#v", history)
+	}
+}
+
 func TestRunToolCallLoop(t *testing.T) {
 	provider := &fakeProvider{responses: []llm.Message{
 		{Content: "let me check", ToolCalls: []llm.ToolCall{

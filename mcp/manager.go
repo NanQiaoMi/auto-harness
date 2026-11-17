@@ -206,6 +206,7 @@ func (m *Manager) resourceTools() []*tools.Tool {
 		return &tools.Tool{
 			Name:        ResourceToolName(kind),
 			Label:       "List MCP " + kind,
+			ReadOnly:    true,
 			Description: "Lists the " + kind + " provided by the connected MCP servers. Resources let a server share data that gives the model context: files, schemas or application data.",
 			Parameters:  listParams,
 			Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
@@ -230,6 +231,7 @@ func (m *Manager) resourceTools() []*tools.Tool {
 		{
 			Name:        ReadResourceTool,
 			Label:       "Read MCP Resource",
+			ReadOnly:    true,
 			Description: "Reads one resource of an MCP server, given the server name and the resource URI.",
 			Parameters:  readParams,
 			Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {

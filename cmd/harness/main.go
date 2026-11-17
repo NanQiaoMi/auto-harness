@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/config"
 	"github.com/NanQiaoMi/auto-harness/contextmgr"
 	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/gitkit"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/perm"
 	"github.com/NanQiaoMi/auto-harness/session"
@@ -59,8 +61,14 @@ func main() {
 		pluginUntrust    = flag.String("plugin-untrust", "", "remove trust for one plugin publisher")
 		pluginTrustList  = flag.Bool("plugin-trust-list", false, "list trusted plugin publishers and keys")
 		pluginUnsigned   = flag.Bool("plugin-allow-unsigned", false, "allow an unsigned remote plugin registry")
+		noGitCheckpoints = flag.Bool("no-git-checkpoints", false, "disable automatic workspace checkpoints")
+		checkpointLimit  = flag.Int("checkpoint-limit", gitkit.DefaultCheckpointLimit, "maximum retained workspace checkpoints")
 	)
 	flag.Parse()
+
+	if *checkpointLimit < 1 {
+		fatal(fmt.Errorf("-checkpoint-limit must be at least 1"))
+	}
 
 	if *showVersion {
 		fmt.Println("harness", version)
@@ -305,12 +313,22 @@ func main() {
 	// --- permissions and sandbox ----------------------------------
 	permSetup := loadPermissions(ctx, cfg, workdir(), registry, interactive, trustSetup.decision.Trusted)
 
+	checkpointMgr := gitkit.NewCheckpointManager(workdir())
+	checkpointMgr.Limit = *checkpointLimit
+
 	// The bash tool runs inside the sandbox when one is configured.
 	bashTool := tools.NewBashTool()
 	if runner := permSetup.sandboxRunner(); runner != nil {
 		bashTool = tools.NewSandboxedBashTool(runner)
 	}
-	for _, t := range []*tools.Tool{bashTool, tools.NewReadTool(), tools.NewWriteTool(), tools.NewEditTool()} {
+	for _, t := range []*tools.Tool{
+		bashTool,
+		tools.NewReadTool(),
+		tools.NewWriteTool(),
+		tools.NewEditTool(),
+		gitkit.NewGitTool(workdir()),
+		gitkit.NewCheckpointTool(checkpointMgr),
+	} {
 		if err := registry.Register(t); err != nil {
 			failStartup(err, shutdownTrusted)
 		}
@@ -441,6 +459,17 @@ func main() {
 		},
 	}, bus, registry)
 	ag.Session = sess
+	if !*noGitCheckpoints {
+		ag.Checkpointer = checkpointMgr
+		if _, created, err := checkpointMgr.Create(ctx, "session start",
+			gitkit.CheckpointManual, "session"); err != nil {
+			if !errors.Is(err, gitkit.ErrNotRepository) {
+				fmt.Fprintf(os.Stderr, "[warn] workspace checkpoint: %v\n", err)
+			}
+		} else if created && !*quiet {
+			fmt.Fprintln(os.Stderr, "[checkpoint] created initial workspace snapshot")
+		}
+	}
 	ag.Compactor = func(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
 		model := ag.Config().Model
 		current, err := llmReg.ProviderFor(model, "")
@@ -488,8 +517,15 @@ func main() {
 
 	// The "!" shortcut runs the user's own shell commands, through the
 	// same bash tool, so the sandbox applies to them too.
+	var userShellRunner shellext.Runner = &shellext.ToolRunner{Tool: bashTool}
+	if !*noGitCheckpoints {
+		userShellRunner = &workspaceCheckpointRunner{
+			checkpointer: checkpointMgr,
+			runner:       userShellRunner,
+		}
+	}
 	shellShortcut := &shellext.Shortcut{
-		Runner:       &shellext.ToolRunner{Tool: bashTool},
+		Runner:       userShellRunner,
 		Conversation: ag,
 		Bus:          bus,
 		Out:          os.Stdout,
@@ -567,14 +603,18 @@ func main() {
 	// nothing else, so the model's text and the tool notices must not
 	// go there. The RPC server writes the records itself.
 	if *rpcMode {
-		if err := runRPCMode(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, profileSetup, *quiet); err != nil {
+		if err := runRPCMode(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr,
+			loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup,
+			skillSetup, trustSetup, profileSetup, checkpointMgr, *quiet); err != nil {
 			fmt.Fprintf(os.Stderr, "harness: %v\n", err)
 			exitStatus(1, shutdownRuntime)
 		}
 		return
 	}
 
-	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, profileSetup, lines, *quiet, *tuiMode)
+	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup,
+		telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, profileSetup,
+		checkpointMgr, lines, *quiet, *tuiMode)
 }
 
 // workdir returns the current working directory, used to locate the
@@ -595,8 +635,9 @@ func sessionReason(resumed string) string {
 }
 
 // runREPL is the interactive loop.
-func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, lines perm.LineReader, quiet bool, tuiMode bool) {
-	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, &quiet)
+func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, lines perm.LineReader, quiet bool, tuiMode bool) {
+	gitOut := newCommandOutput(os.Stdout)
+	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, checkpointMgr, gitOut, &quiet)
 
 	// The prompt templates are slash commands like any other, so they
 	// live on the same registry. They are installed once here; the TUI
@@ -626,7 +667,7 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 	}
 
 	if tuiMode {
-		runTUIREPL(ctx, ag, bus, commands, cfg, permSetup, shellShortcut, promptSetup, skillSetup, quiet)
+		runTUIREPL(ctx, ag, bus, commands, cfg, permSetup, shellShortcut, promptSetup, skillSetup, gitOut, quiet)
 		return
 	}
 
@@ -651,7 +692,7 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if err := handleCommand(ctx, commands, line); errors.Is(err, errExitREPL) {
+			if err := handleCommand(ctx, commands, line, os.Stdout, os.Stderr); errors.Is(err, errExitREPL) {
 				return
 			}
 			continue
@@ -679,7 +720,7 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 }
 
 // handleCommand dispatches a slash line to the command registry.
-func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line string) error {
+func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line string, out, errOut io.Writer) error {
 	name, args := line, ""
 	if i := strings.IndexAny(line, " \t"); i > 0 {
 		name, args = line[:i], strings.TrimSpace(line[i+1:])
@@ -688,22 +729,23 @@ func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line stri
 	// Builtins take precedence over suffixed extension collisions.
 	c, ok := commands.Get(name)
 	if !ok {
-		fmt.Printf("unknown command /%s — try /help\n", name)
+		fmt.Fprintf(out, "unknown command /%s — try /help\n", name)
 		return nil
 	}
 	if err := c.Handler(ctx, args); err != nil {
 		if errors.Is(err, errExitREPL) {
 			return errExitREPL
 		}
-		fmt.Fprintf(os.Stderr, "/%s: %v\n", name, err)
+		fmt.Fprintf(errOut, "/%s: %v\n", name, err)
 	}
 	return nil
 }
 
 // registerBuiltinCommands wires the REPL's own slash commands through
 // the same registry extensions use.
-func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, profileSetup *profileSetup, skillSetup *skillSetup, promptSetup *promptSetup, quiet *bool) {
+func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, profileSetup *profileSetup, skillSetup *skillSetup, promptSetup *promptSetup, checkpointMgr *gitkit.Manager, gitOut io.Writer, quiet *bool) {
 	registerTreeCommands(commands, &treeSession{sess: sess, ag: ag, dir: cfg.SessionDir, bus: bus})
+	registerGitCommands(commands, checkpointMgr, gitOut)
 	commands.Register("trust", &ext.Command{
 		Description: "show or set the project trust decision",
 		Handler: func(ctx context.Context, args string) error {

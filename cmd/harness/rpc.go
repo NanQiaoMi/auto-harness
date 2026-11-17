@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/NanQiaoMi/auto-harness/agent"
 	"github.com/NanQiaoMi/auto-harness/config"
 	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/gitkit"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/rpc"
 	"github.com/NanQiaoMi/auto-harness/session"
@@ -25,10 +27,13 @@ import (
 // The command registry is filled with the builtins, the prompt
 // templates and the skills, so a client can ask what the harness
 // knows and invoke any of it.
-func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, quiet bool) error {
+func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, quiet bool) error {
 	// The builtins go on the registry so get_commands reports them and
 	// a client can invoke them.
-	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, &quiet)
+	commandOut := newCommandOutput(os.Stderr)
+	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader,
+		mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup,
+		promptSetup, checkpointMgr, commandOut, &quiet)
 	if promptSetup != nil {
 		promptSetup.install(commands, ag)
 	}
@@ -50,6 +55,18 @@ func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus
 	}
 	server.Plugins = func() any {
 		return pluginsPayload(loader, extMgr)
+	}
+	if checkpointMgr != nil {
+		server.Checkpoints = checkpointMgr.List
+		server.CreateCheckpoint = func(ctx context.Context, label string) (gitkit.Checkpoint, bool, error) {
+			if strings.TrimSpace(label) == "" {
+				label = "manual checkpoint"
+			}
+			return checkpointMgr.Create(ctx, label, gitkit.CheckpointManual, "rpc")
+		}
+		server.RewindCheckpoint = func(ctx context.Context, selector string, resetHead bool) (gitkit.RewindResult, error) {
+			return checkpointMgr.Rewind(ctx, selector, resetHead)
+		}
 	}
 	server.Models = func() []rpc.ModelInfo {
 		models := llmReg.Models()
