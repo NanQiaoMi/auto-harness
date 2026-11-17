@@ -72,3 +72,22 @@ func TestProjectProfilePluginDirsWaitForTrust(t *testing.T) {
 		t.Fatal("a trusted project profile plugin was not discovered")
 	}
 }
+
+func TestManagedPluginDirectoryIsDiscovered(t *testing.T) {
+	home := isolateHome(t)
+	managed := filepath.Join(home, ".harness", "plugins")
+	writeManifestPlugin(t, managed, "managed", "1.2.3")
+
+	loader := &extensionLoader{projectRoot: t.TempDir(), cfg: &config.Config{}}
+	loader.configure(&agentprofile.Profile{
+		Plugins: []string{"managed"},
+		Env:     map[string]string{"PROFILE_VALUE": "managed"},
+	}, false)
+	extensions := loader.processExtensions(loader.trustedDirs())
+	if len(extensions) != 1 {
+		t.Fatalf("managed plugins = %d, want 1", len(extensions))
+	}
+	if len(loader.pluginRecords) != 1 || loader.pluginRecords[0].Candidate.Name() != "managed" {
+		t.Fatalf("records = %+v", loader.pluginRecords)
+	}
+}

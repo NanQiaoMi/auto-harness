@@ -92,6 +92,7 @@ func (l *extensionLoader) trustedDirs() []string {
 	if !l.profileFromProject {
 		dirs = append(dirs, l.pluginDirs...)
 	}
+	dirs = append(dirs, plugins.InstallDir())
 	home, err := os.UserHomeDir()
 	if err == nil {
 		dirs = append(dirs, filepath.Join(home, ext.GlobalExtensionsDir))

@@ -50,6 +50,11 @@ func main() {
 		listMCP          = flag.Bool("mcp-list", false, "list configured MCP servers and exit")
 		profileFlag      = flag.String("profile", "", "agent environment profile: name or JSON path")
 		listProfilesFlag = flag.Bool("list-profiles", false, "list available agent profiles and exit")
+		pluginIndex      = flag.String("plugin-index", os.Getenv("HARNESS_PLUGIN_INDEX"), "plugin registry path or HTTPS URL")
+		pluginInstall    = flag.String("plugin-install", "", "install a managed plugin: name[@version]")
+		pluginRemove     = flag.String("plugin-remove", "", "remove a managed plugin")
+		pluginList       = flag.Bool("plugin-list", false, "list managed plugins and exit")
+		pluginVerify     = flag.Bool("plugin-verify", false, "verify the managed plugin lock and trees")
 	)
 	flag.Parse()
 
@@ -68,6 +73,22 @@ func main() {
 		jsonOutput = true
 	default:
 		fatal(fmt.Errorf("invalid mode %q: valid values are json", *modeFlag))
+	}
+
+	if handled, code, err := runPluginCommand(pluginCommandOptions{
+		Index:   *pluginIndex,
+		Install: *pluginInstall,
+		Remove:  *pluginRemove,
+		List:    *pluginList,
+		Verify:  *pluginVerify,
+	}); handled {
+		if err != nil {
+			fatal(err)
+		}
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	}
 
 	cfg, err := config.Load()
