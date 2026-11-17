@@ -33,6 +33,8 @@ type promptSetup struct {
 	// it with a writer into its transcript, because the screen owns
 	// the terminal.
 	out func(string)
+	// missing are profile-selected template names that were not found.
+	missing []string
 }
 
 // loadPrompts reads the templates and the context files.
@@ -43,7 +45,7 @@ type promptSetup struct {
 //
 // The context files come from the working directory: they describe the
 // project the agent is working in.
-func loadPrompts(cfg *config.Config, workdir string, trusted bool) *promptSetup {
+func loadPrompts(cfg *config.Config, workdir string, trusted bool, customDirs []string, selected []string) *promptSetup {
 	setup := &promptSetup{
 		registry: prompts.NewRegistry(),
 		files:    &projcontext.Instructions{},
@@ -63,8 +65,16 @@ func loadPrompts(cfg *config.Config, workdir string, trusted bool) *promptSetup 
 		trusted = true
 	}
 	// seen keeps a directory from being read twice.
+	dirs := append([]string{}, customDirs...)
+	dirs = append(dirs, projectDir, userDir)
+	selectedSet := map[string]bool{}
+	if selected != nil {
+		for _, name := range selected {
+			selectedSet[name] = true
+		}
+	}
 	seen := map[string]bool{}
-	for _, dir := range []string{projectDir, userDir} {
+	for _, dir := range dirs {
 		if !trusted && dir == projectDir {
 			continue
 		}
@@ -86,7 +96,20 @@ func loadPrompts(cfg *config.Config, workdir string, trusted bool) *promptSetup 
 		}
 		setup.dirs = append(setup.dirs, dir)
 		for _, template := range templates {
+			if selected != nil {
+				if !selectedSet[template.Name] {
+					continue
+				}
+				delete(selectedSet, template.Name)
+			}
 			setup.registry.Add(template)
+		}
+	}
+	if selected != nil {
+		for _, name := range selected {
+			if selectedSet[name] {
+				setup.missing = append(setup.missing, name)
+			}
 		}
 	}
 
@@ -188,5 +211,8 @@ func (p *promptSetup) report(out func(string)) {
 	}
 	if p.files != nil && p.files.System != "" {
 		out(fmt.Sprintf("system prompt: %s", filepath.Join(filepath.Dir(p.files.Path), projcontext.SystemFile)))
+	}
+	for _, name := range p.missing {
+		out(fmt.Sprintf("missing: profile selected prompt %q", name))
 	}
 }

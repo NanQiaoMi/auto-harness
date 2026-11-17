@@ -31,6 +31,8 @@ type skillSetup struct {
 	// a writer into its transcript, because the screen owns the
 	// terminal.
 	out func(string)
+	// missing are profile-selected names that were not found.
+	missing []string
 }
 
 // loadSkills reads the skills from the project's and the user's
@@ -40,7 +42,7 @@ type skillSetup struct {
 // sees for a name the project defines; the user's own directory is the
 // fallback for the names the project does not use. That is the same
 // precedence the permission layer gives the user's rules.
-func loadSkills(cfg *config.Config, workdir string, trusted bool) *skillSetup {
+func loadSkills(cfg *config.Config, workdir string, trusted bool, customDirs []string, selected []string) *skillSetup {
 	setup := &skillSetup{
 		registry: skills.NewRegistry(),
 		out: func(line string) {
@@ -57,7 +59,15 @@ func loadSkills(cfg *config.Config, workdir string, trusted bool) *skillSetup {
 		}
 	}
 
-	dirs := skills.Dirs(workdir, config.Dir())
+	dirs := profileSkillDirs(customDirs)
+	dirs = append(dirs, skills.Dirs(workdir, config.Dir())...)
+	dirs = uniqueSkillDirs(dirs)
+	selectedSet := map[string]bool{}
+	if selected != nil {
+		for _, name := range selected {
+			selectedSet[name] = true
+		}
+	}
 	for _, dir := range dirs {
 		if skipped[dir.Path] {
 			continue
@@ -69,8 +79,19 @@ func loadSkills(cfg *config.Config, workdir string, trusted bool) *skillSetup {
 		}
 		setup.dirs = append(setup.dirs, dir.Path)
 		for _, skill := range found {
+			if selected != nil && !selectedSet[skill.Name] {
+				continue
+			}
+			delete(selectedSet, skill.Name)
 			if err := setup.registry.Add(skill); err != nil {
 				setup.diagnostics = append(setup.diagnostics, skills.Collision(skill.Path, err.Error()))
+			}
+		}
+	}
+	if selected != nil {
+		for _, name := range selected {
+			if selectedSet[name] {
+				setup.missing = append(setup.missing, name)
 			}
 		}
 	}
@@ -83,6 +104,30 @@ func loadSkills(cfg *config.Config, workdir string, trusted bool) *skillSetup {
 		}
 	}
 	return setup
+}
+
+// profileSkillDirs turns a profile's directories into discovery
+// entries. They use the harness's flexible mode, so both SKILL.md
+// bundles and a directory of markdown skills work.
+func profileSkillDirs(dirs []string) []skills.Dir {
+	out := make([]skills.Dir, 0, len(dirs))
+	for _, dir := range dirs {
+		out = append(out, skills.Dir{Path: dir, Mode: skills.ModeHarness})
+	}
+	return out
+}
+
+func uniqueSkillDirs(dirs []skills.Dir) []skills.Dir {
+	seen := map[string]bool{}
+	out := make([]skills.Dir, 0, len(dirs))
+	for _, dir := range dirs {
+		if dir.Path == "" || seen[dir.Path] {
+			continue
+		}
+		seen[dir.Path] = true
+		out = append(out, dir)
+	}
+	return out
 }
 
 // systemPrompt folds the skills into the system prompt.
@@ -179,5 +224,8 @@ func (s *skillSetup) report(out func(string)) {
 	}
 	for _, diagnostic := range s.diagnostics {
 		out(fmt.Sprintf("  [%s] %s: %s", diagnostic.Type, diagnostic.Path, diagnostic.Message))
+	}
+	for _, name := range s.missing {
+		out(fmt.Sprintf("  [missing] profile selected skill %q", name))
 	}
 }

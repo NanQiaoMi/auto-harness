@@ -11,6 +11,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/mcp"
 	"github.com/NanQiaoMi/auto-harness/perm"
+	"github.com/NanQiaoMi/auto-harness/plugins"
 	"github.com/NanQiaoMi/auto-harness/skills"
 )
 
@@ -109,16 +110,25 @@ func projectResources(workdir string) []trustResource {
 
 	var out []trustResource
 
-	// Process extensions.
+	// Process extensions and manifest plugins.
 	projectExt := filepath.Join(root, ext.ProjectExtensionsDir)
 	userExt := ""
 	if home != "" {
 		userExt = filepath.Join(home, ext.GlobalExtensionsDir)
 	}
 	if projectExt != userExt {
-		if n := len(ext.DiscoverIn([]string{projectExt})); n > 0 {
-			out = append(out, trustResource{Label: "extensions", Path: projectExt, Count: n})
+		found, errs := plugins.Discover([]string{projectExt})
+		if n := len(found) + len(errs); n > 0 {
+			out = append(out, trustResource{Label: "extensions/plugins", Path: projectExt, Count: n})
 		}
+	}
+
+	// Agent profiles can select a model, prompt, plugin and MCP
+	// surface, so a project profile is part of the same trust decision.
+	projectProfiles := filepath.Join(root, skills.ConfigDirName, "profiles")
+	if n := countFiles(projectProfiles, ".json"); n > 0 &&
+		(home == "" || projectProfiles != filepath.Join(home, ".harness", "profiles")) {
+		out = append(out, trustResource{Label: "agent profiles", Path: projectProfiles, Count: n})
 	}
 
 	// MCP servers.

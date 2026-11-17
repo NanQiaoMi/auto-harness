@@ -41,6 +41,10 @@ type Server struct {
 	// Gate lets a caller veto a command before it runs. It is nil when
 	// nothing is watching the commands.
 	Gate func(command string) error
+	// Profile returns the active agent environment description.
+	Profile func() any
+	// Plugins returns the discovered plugin catalog.
+	Plugins func() any
 
 	// out is the stream the records go to.
 	out io.Writer
@@ -197,6 +201,10 @@ func (s *Server) dispatch(ctx context.Context, command *Command) *Response {
 		return s.setSessionName(command)
 	case CmdGetCommands:
 		return s.getCommands(command)
+	case CmdGetProfile:
+		return s.getProfile(command)
+	case CmdGetPlugins:
+		return s.getPlugins(command)
 	case CmdFork:
 		return s.fork(command, "fork")
 	case CmdClone:
@@ -204,6 +212,23 @@ func (s *Server) dispatch(ctx context.Context, command *Command) *Response {
 	default:
 		return Failure(command.ID, command.Type, fmt.Sprintf("Unknown command: %s", command.Type))
 	}
+}
+
+// getProfile reports the active environment without exposing profile
+// secrets or child-process environment values.
+func (s *Server) getProfile(command *Command) *Response {
+	if s.Profile == nil {
+		return Success(command.ID, CmdGetProfile, map[string]any{"enabled": false})
+	}
+	return Success(command.ID, CmdGetProfile, s.Profile())
+}
+
+// getPlugins reports the plugin catalog and load state.
+func (s *Server) getPlugins(command *Command) *Response {
+	if s.Plugins == nil {
+		return Success(command.ID, CmdGetPlugins, PluginsPayload{Plugins: []PluginInfo{}})
+	}
+	return Success(command.ID, CmdGetPlugins, s.Plugins())
 }
 
 // prompt sends a message to the agent.
@@ -348,9 +373,14 @@ func (s *Server) setModel(command *Command) *Response {
 	if s.Session != nil {
 		s.Session.SetModel(args.Model)
 	}
+	provider := ""
+	if s.Agent.Provider() != nil {
+		provider = s.Agent.Provider().Name()
+	}
 	return Success(command.ID, CmdSetModel, ModelInfo{
-		ID:   args.Model,
-		Name: args.Model,
+		ID:       args.Model,
+		Name:     args.Model,
+		Provider: provider,
 	})
 }
 

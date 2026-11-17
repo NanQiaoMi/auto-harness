@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -134,7 +135,9 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			handleCommand(ctx, commands, line)
+			if err := handleCommand(ctx, commands, line); errors.Is(err, errExitREPL) {
+				return
+			}
 			continue
 		}
 		if err := ctx.Err(); err != nil {

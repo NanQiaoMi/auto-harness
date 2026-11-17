@@ -46,6 +46,10 @@ const (
 	CmdSetSessionName = "set_session_name"
 	// CmdGetCommands lists the slash commands the harness knows.
 	CmdGetCommands = "get_commands"
+	// CmdGetProfile reports the agent environment profile in effect.
+	CmdGetProfile = "get_profile"
+	// CmdGetPlugins reports the discovered plugin catalog and state.
+	CmdGetPlugins = "get_plugins"
 	// CmdFork branches the session at an entry.
 	CmdFork = "fork"
 	// CmdClone copies the current branch into a new session.
@@ -214,6 +218,53 @@ type CommandInfo struct {
 	// Source says where the command comes from: "builtin",
 	// "extension", "prompt" or "skill".
 	Source string `json:"source"`
+}
+
+// ProfilePayload reports the active agent environment. Environment
+// values are represented by their keys only.
+type ProfilePayload struct {
+	Enabled        bool     `json:"enabled"`
+	Name           string   `json:"name,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	Scope          string   `json:"scope,omitempty"`
+	Model          string   `json:"model"`
+	Provider       string   `json:"provider,omitempty"`
+	MaxTurns       int      `json:"maxTurns,omitempty"`
+	MaxTokens      int      `json:"maxTokens,omitempty"`
+	ActiveTools    []string `json:"activeTools"`
+	AllTools       int      `json:"allTools"`
+	Tools          []string `json:"tools"`
+	ToolsAll       bool     `json:"toolsAll"`
+	Plugins        []string `json:"plugins"`
+	PluginsAll     bool     `json:"pluginsAll"`
+	MCPServers     []string `json:"mcpServers"`
+	MCPServersAll  bool     `json:"mcpServersAll"`
+	Skills         []string `json:"skills"`
+	SkillsAll      bool     `json:"skillsAll"`
+	Prompts        []string `json:"prompts"`
+	PromptsAll     bool     `json:"promptsAll"`
+	PluginDirs     []string `json:"pluginDirs,omitempty"`
+	SkillDirs      []string `json:"skillDirs,omitempty"`
+	PromptDirs     []string `json:"promptDirs,omitempty"`
+	EnvKeys        []string `json:"envKeys,omitempty"`
+	PluginWarnings []string `json:"pluginWarnings,omitempty"`
+}
+
+// PluginsPayload reports every discovered process plugin.
+type PluginsPayload struct {
+	Plugins []PluginInfo `json:"plugins"`
+}
+
+// PluginInfo describes one manifest or legacy plugin.
+type PluginInfo struct {
+	Name        string `json:"name"`
+	Version     string `json:"version,omitempty"`
+	Path        string `json:"path"`
+	Selected    bool   `json:"selected"`
+	State       string `json:"state"`
+	Description string `json:"description,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // The result the bash command reports.

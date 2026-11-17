@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/envsubst"
 	"github.com/NanQiaoMi/auto-harness/mcp"
 	"github.com/NanQiaoMi/auto-harness/tools"
 )
@@ -27,6 +28,10 @@ type mcpSetup struct {
 	userPath string
 	// projectPath is the project-level mcp.json.
 	projectPath string
+	// selected is the profile's server allowlist. nil means all.
+	selected []string
+	// missing are profile selections that no configuration provided.
+	missing []string
 }
 
 // loadMCPServers reads the MCP configuration and connects the servers.
@@ -38,13 +43,14 @@ type mcpSetup struct {
 //
 // A server that fails to connect is reported but does not stop the
 // others.
-func loadMCPServers(ctx context.Context, cfg *config.Config, projectRoot string, registry *tools.Registry, trusted bool) *mcpSetup {
+func loadMCPServers(ctx context.Context, cfg *config.Config, projectRoot string, registry *tools.Registry, trusted bool, selected []string, inheritedEnv map[string]string) *mcpSetup {
 	setup := &mcpSetup{
 		manager:     mcp.NewManager(registry),
 		sources:     map[string]string{},
 		errors:      map[string]error{},
 		userPath:    mcp.DefaultUserPath(),
 		projectPath: mcp.DefaultProjectPath(projectRoot),
+		selected:    selected,
 	}
 	if cfg.NoMCP {
 		return setup
@@ -74,13 +80,29 @@ func loadMCPServers(ctx context.Context, cfg *config.Config, projectRoot string,
 	}
 
 	names := make([]string, 0, len(byName))
-	for n := range byName {
-		names = append(names, n)
+	if selected == nil {
+		for n := range byName {
+			names = append(names, n)
+		}
+	} else {
+		for _, name := range selected {
+			if _, ok := byName[name]; !ok {
+				setup.missing = append(setup.missing, name)
+				continue
+			}
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 
 	for _, name := range names {
 		s := byName[name]
+		var err error
+		s, err = expandMCPServerConfig(s, inheritedEnv)
+		if err != nil {
+			setup.errors[name] = err
+			continue
+		}
 		if err := mcp.Validate(s); err != nil {
 			setup.errors[name] = err
 			continue
@@ -103,10 +125,80 @@ func loadMCPServers(ctx context.Context, cfg *config.Config, projectRoot string,
 	return setup
 }
 
+// expandMCPServerConfig applies the same strict environment syntax the
+// profile and plugin layers use. Profile values win over the process
+// environment, and a server's own env entries win over both.
+func expandMCPServerConfig(server mcp.ServerConfig, inherited map[string]string) (mcp.ServerConfig, error) {
+	lookup := func(name string) (string, bool) {
+		if value, ok := inherited[name]; ok {
+			return value, true
+		}
+		return os.LookupEnv(name)
+	}
+	expand := func(field, value string) (string, error) {
+		resolved, err := envsubst.Expand(value, lookup)
+		if err != nil {
+			return "", fmt.Errorf("mcp %s: %s: %w", server.Name, field, err)
+		}
+		return resolved, nil
+	}
+
+	if resolved, err := expand("command", server.Command); err != nil {
+		return server, err
+	} else {
+		server.Command = resolved
+	}
+	if resolved, err := expand("cwd", server.CWD); err != nil {
+		return server, err
+	} else {
+		server.CWD = resolved
+	}
+	if resolved, err := expand("url", server.URL); err != nil {
+		return server, err
+	} else {
+		server.URL = resolved
+	}
+	for i, arg := range server.Args {
+		resolved, err := expand(fmt.Sprintf("args[%d]", i), arg)
+		if err != nil {
+			return server, err
+		}
+		server.Args[i] = resolved
+	}
+	for key, value := range server.Headers {
+		resolved, err := expand("headers."+key, value)
+		if err != nil {
+			return server, err
+		}
+		server.Headers[key] = resolved
+	}
+
+	env := make(map[string]string, len(inherited)+len(server.Env))
+	for key, value := range inherited {
+		env[key] = value
+	}
+	for key, value := range server.Env {
+		env[key] = value
+	}
+	for key, value := range env {
+		resolved, err := expand("env."+key, value)
+		if err != nil {
+			return server, err
+		}
+		env[key] = resolved
+	}
+	server.Env = env
+	return server, nil
+}
+
 // report prints the state of every configured MCP server.
 func (s *mcpSetup) report() {
 	if len(s.configs) == 0 && len(s.errors) == 0 {
-		fmt.Println("no MCP servers configured")
+		if s.selected != nil {
+			fmt.Println("no MCP servers selected by the profile")
+		} else {
+			fmt.Println("no MCP servers configured")
+		}
 		return
 	}
 	connected := map[string]bool{}
@@ -128,6 +220,9 @@ func (s *mcpSetup) report() {
 	for _, name := range failed {
 		fmt.Printf("%-20s failed     %v\n", name, s.errors[name])
 	}
+	for _, name := range s.missing {
+		fmt.Printf("%-20s missing    selected by the profile, not configured\n", name)
+	}
 }
 
 // toolNames returns the names of the tools a server contributed.
@@ -141,6 +236,23 @@ func (s *mcpSetup) toolNames(server string) []string {
 		out = append(out, mcp.ToolName(server, t.Name))
 	}
 	return out
+}
+
+// selectedFailures returns configured servers the profile named that
+// did not connect. Normal discovery keeps the historical best-effort
+// behavior; an explicit profile selection is a stronger contract.
+func (s *mcpSetup) selectedFailures() []string {
+	if s == nil || s.selected == nil {
+		return nil
+	}
+	var failed []string
+	for _, name := range s.selected {
+		if _, ok := s.errors[name]; ok {
+			failed = append(failed, name)
+		}
+	}
+	sort.Strings(failed)
+	return failed
 }
 
 // addCommand adds a server to the user-level mcp.json.

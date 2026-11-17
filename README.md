@@ -14,6 +14,7 @@ tui/                  差分渲染终端 UI（对齐 pi-tui）                  
   screen.go             屏幕抽象：主屏/备用屏、同步输出、渲染循环
   transcript.go         Transcript（对话滚动区）+ Editor（输入行）
 agent/                核心 agent 循环（turn loop + 工具执行 + 全程事件）   ← pi-agent-core
+agentprofile/         Agent 环境描述：模型 / 提示词 / 工具 / 插件 / MCP / Skills / 压缩策略
 llm/                  统一 LLM API：中立消息模型、流式事件、模型目录      ← pi-ai
   llm.go                Message / ToolCall / Provider / Stream 抽象
   openai.go             OpenAI 兼容协议（OpenAI/DeepSeek/Moonshot/Ollama/…）
@@ -30,6 +31,8 @@ ext/                  扩展系统：事件总线 + Extension API + 加载器   
   loader.go             Manager：加载、卸载、热重载  scope.go              注册作用域：记录扩展注册了什么，重载时自动撤销
   protocol.go           进程扩展的 JSON-RPC 协议（stdio）
   process.go            进程扩展客户端：握手、工具桥接、事件转发
+plugins/              目录插件：plugin.json 清单、路径约束、能力授权、旧可执行文件兼容
+envsubst/             严格 ${NAME} / ${NAME:-默认} 展开，未定义变量直接报错
 shellext/             `!` shell 快捷：用户直接跑命令，不经过模型
   shellext.go           解析 `!` / `!!`、user_bash 事件、结果格式化
 prompts/              Prompt 模板：markdown 文件变成斜杠命令
@@ -216,8 +219,9 @@ auto-harness 的 provider 挂钩不在事件总线上，而在 `llm.Hooks`（`Be
 决定要发生在项目资源装配之前，这条路上只开放给进程内扩展。另一个差别是
 `defaultProjectTrust` 这个三态开关 auto-harness 没有——`trust_project: true` 就是
 "总是信任"，没配置时交互式问、非交互式拒绝。信任覆盖的范围比 pi 文档点名的
-（`.pi` 和 `.agents/skills`）更明确：项目级扩展、MCP server、权限规则、prompt 模板、
-skill 都算，`AGENTS.md` / `SYSTEM.md` 不算（它们是给模型的指示，不会自己运行）。
+（`.pi` 和 `.agents/skills`）更明确：项目级扩展/插件清单、agent profile、MCP
+server、权限规则、prompt 模板、skill 都算，`AGENTS.md` / `SYSTEM.md` 不算（它们是
+给模型的指示，不会自己运行）。
 
 ## 快速开始
 
@@ -258,17 +262,59 @@ export OPENAI_API_KEY=oc_sk-...
 # RPC 模式：stdin 收 JSON 命令，stdout 吐 JSON 记录，被别的程序驱动
 ./bin/harness -rpc
 
+# Agent 环境 profile：选择模型、工具面、插件、MCP、Skills 和压缩策略
+./bin/harness -profile coding
+./bin/harness -profile ./examples/agent-profiles/coding.json
+./bin/harness -list-profiles
+
 # 会话管理
 ./bin/harness -list-sessions
 ./bin/harness -session 20261111-153000.123456789   # 恢复会话
 ```
 
-REPL 内置命令：`/help` `/tools` `/model <id>` `/models` `/sessions` `/context` `/compact` `/quiet` `/extensions` `/reload` `/tree` `/fork` `/clone` `/mcp` `/telemetry` `/prompts` `/skills` `/exit`。
+REPL 内置命令：`/help` `/tools` `/profile` `/plugins` `/model <id>` `/models` `/sessions` `/context` `/compact` `/quiet` `/extensions` `/reload` `/tree` `/fork` `/clone` `/mcp` `/telemetry` `/prompts` `/skills` `/exit`。
 
 `.harness/prompts/` 里的模板和 skill 也注册成斜杠命令，和上面这些并列出现在 `/help` 里。
 
 REPL 里以 `!` 开头的行是 shell 快捷：`!cmd` 跑命令并把结果放进对话，`!!cmd` 只给你看、
 模型看不到。
+
+### Agent 环境 profile（[agentprofile/](agentprofile/)、[docs/agent-profiles.md](docs/agent-profiles.md)）
+
+profile 把「一个环境需要什么」变成一份可检查的 JSON，而不是散落在启动参数、配置文件和
+代码分支里。它可以在一次装配中同时选择模型、系统提示词、工具白名单、进程插件、MCP
+server、Skills、Prompt 模板和上下文压缩参数：
+
+```json
+{
+  "schema_version": 1,
+  "name": "coding",
+  "model": "claude-sonnet-5-5",
+  "max_turns": 40,
+  "tools": ["bash", "read", "write", "edit"],
+  "plugins": ["pdf-tools"],
+  "mcp_servers": ["docs"],
+  "skills": ["release-notes"],
+  "context": {"compact_at": 0.7, "keep_recent_messages": 6},
+  "env": {"PDF_CACHE_DIR": "${HOME}/.cache/pdf-tools"}
+}
+```
+
+选择字段有一个重要区别：**字段省略/null = 正常发现全部；`[]` = 明确一个都不要；
+`["x"]` = 只要这些**。所以同一个内核可以装配完整 coding agent、只有 shell 的运维
+agent，或者完全不暴露工具的内容 agent。`tools` 在插件和 MCP 都注册完之后最后应用，
+因此一个白名单可以同时引用内置工具、插件工具和 `mcp__server__tool`；引用不存在的工具
+会启动失败，而不是静默少一个能力。
+
+profile 不绕过信任和权限：项目 profile 只有在项目已被持久信任（或
+`trust_project: true`）时才可读取；首次交互信任判定发生在模型装配之后，所以先信任项目、
+下一次再选它的 profile；完整信任判定之后还会再次检查，扩展否决项目时就中止，不装配
+项目选中的插件/MCP/Skill/Prompt。显式路径 `-profile ./x.json` 是用户自己的选择，不受此限制。
+切换 provider 时，`OPENAI_*` / `ANTHROPIC_*` 的 key 和 base URL 按最终 provider 解析，
+不会把 profile 应用前的旧 provider 凭据带过去；config 里显式写的值和 CLI 参数仍然优先。
+`/profile` 查看当前装配，`/plugins` 查看插件来源、版本和加载状态，RPC 提供
+`get_profile` / `get_plugins`。完整 schema、插件清单和能力边界见
+[docs/agent-profiles.md](docs/agent-profiles.md)。
 
 ### Prompt 模板、项目上下文与 Skills
 
@@ -591,6 +637,28 @@ chmod +x examples/extensions/demo_extension.py
 # 或在 config.json 里： "extension_dirs": ["examples/extensions"]
 ```
 
+目录插件不需要把入口做成裸可执行文件。它放一个 `plugin.json`，描述启动命令、固定
+工作目录、环境变量和声明式能力：
+
+```json
+{
+  "schema_version": 1,
+  "name": "pdf-tools",
+  "version": "0.1.0",
+  "command": ["python3", "plugin.py"],
+  "cwd": "${pluginDir}",
+  "env": {"PDF_CACHE_DIR": "${PROFILE_CACHE_DIR}"},
+  "capabilities": ["tools", "hooks"]
+}
+```
+
+清单不是第二套工具注册表：进程启动后的 `manifest` 响应仍是工具名、参数 schema 和
+consult 事件的唯一权威。`plugin.json` 负责稳定身份、启动和授权：未知字段/坏 schema
+拒绝；`cwd` 与路径型入口在 symlink 解析后仍必须留在插件目录内；`capabilities` 是
+显式授权（`tools` / `hooks` / `events`），比如只给了 `tools` 的插件不能注册 consult
+hook，推送的事件也会被丢弃。旧的可执行文件发现方式继续兼容。profile 的 `plugins`
+按名字选择插件，未列出的插件不启动；`/plugins` 显示版本、来源和状态。
+
 ### 热重载
 
 `/reload` 按 pi 的语义重载扩展：
@@ -844,6 +912,8 @@ REPL 是给人用的。要把 harness 嵌进 IDE、脚本（任何语言）或�
 | `get_last_assistant_text` | — | 最后一条助手消息 |
 | `set_session_name` | `name` | 给会话命名 |
 | `get_commands` | — | harness 知道的斜杠命令（内置 + 模板 + skill） |
+| `get_profile` | — | 当前 Agent 环境：profile 来源、选择模式、活跃工具、环境变量键（不返回值） |
+| `get_plugins` | — | 已发现插件的名称、版本、路径、是否被 profile 选择和加载状态 |
 | `fork` / `clone` | `entryId` | 分叉会话 |
 
 **`prompt` 是异步的**：响应只说明「收下了」，答案在事件流里。客户端要等
@@ -930,6 +1000,15 @@ stdout 归事件流所有：模型文本、工具提示、诊断全走 stderr。
 
 也支持在 `~/.harness/config.json` 里用 `mcp_servers` 声明（同名时以它为准）。
 
+当 agent profile 带 `mcp_servers` 时，上面合并出来的 catalog 会再按这个白名单过滤：
+列表里的 server 才连接，`[]` 表示完全不连接 MCP，profile 点名但 catalog 里不存在的
+server 会启动失败，点名且存在的 server 连接失败也会终止启动。profile 的 `env` 会继承
+给 stdio MCP 子进程，单 server 自己的 `env` 覆盖同名项；HTTP headers 和 profile
+环境值都不会出现在 `/profile` / RPC 输出里。
+`command` / `args` / `cwd` / `env` / `url` / `headers` 里的 `${NAME}` 会按同一套严格
+规则展开（profile 值优先于进程环境，未定义且没有 `${NAME:-默认}` 就报错，不连接这个
+server），所以 token 不需要写进 profile 或 mcp.json。
+
 **传输**：stdio（`command`/`args`/`env`/`cwd` 子进程）和 streamable HTTP（`url`/`headers`）。
 SSE 传输不支持。
 
@@ -970,9 +1049,9 @@ SSE 传输不支持。
 
 ## 项目信任（[cmd/harness/trust.go](cmd/harness/trust.go)）
 
-一个克隆下来的仓库可以自带可执行扩展、MCP server、权限规则、prompt 模板和 skill。
-这些都是项目级资源，**在信任判定之前一个都不加载**——不然打开一个陌生仓库就等于
-运行它的代码。
+一个克隆下来的仓库可以自带可执行扩展、`plugin.json` 目录插件、agent profile、MCP
+server、权限规则、prompt 模板和 skill。这些都是项目级资源，**在信任判定之前一个都
+不加载**——不然打开一个陌生仓库就等于运行它的代码。
 
 判定顺序（对齐 pi 的 `project_trust`）：
 
@@ -988,6 +1067,13 @@ SSE 传输不支持。
 `/trust` 查看当前决定和项目资源，`/trust yes|no` 保存决定，`/trust reset` 忘掉、
 下次再问。决定按**绝对工作目录**记录，保存的决定和 `trust_project` 在下次启动时
 生效（资源是在启动时装配的）。
+
+项目级 agent profile 也遵守这个顺序。它会影响模型、系统提示词和插件选择，所以只有
+项目已有保存的 `"yes"` 或 `trust_project: true` 时，`-profile <name>` 才会读取
+`.harness/profiles/<name>.json`。首次交互信任提示发生在模型和会话装配之后；先在没有
+profile 的运行里信任项目，下一次再选它的 profile。显式文件路径不受此限制。项目 profile
+的 `plugin_dirs` / `skill_dirs` / `prompt_dirs` 可以是仓外路径，信任项目前应按审查扩展
+的方式检查这些声明。
 
 项目上下文文件（`AGENTS.md` / `SYSTEM.md`）不参与信任判定：它们是给模型的指示，
 不会自己运行。信任只决定"项目自己的配置要不要读"，不决定"模型能做什么"——权限层
@@ -1278,6 +1364,10 @@ go test -tags e2e -timeout 600s -v ./e2e/
 
 覆盖：文本补全、bash 工具调用闭环、文件工具读写改往返、会话持久化与恢复、请求级上下文预算与自动摘要（保留最新用户意图、tool call/result 不悬空、摘要分块合并、失败回退、会话重载一致）、上下文压缩后信息保真、推理流透传且不污染转录、工具失败后的恢复、上下文超时中止、进程扩展工具、进程扩展否决工具调用（`event.consult` 反向通道：否决、答不上来拦下、没声明就不问）、进程扩展改写 prompt（`input` 反向通道：改写后的话真的到了模型那里）、MCP 工具、MCP resources、会话分叉与分支、权限拦截与放行、遥测落盘、OTLP 投递、Prometheus remote write 投递、工具渲染器接管呈现、`!` 快捷（含 `!!` 不进上下文）、文件变更队列串行化、Prompt 模板参数替换、项目上下文文件（AGENTS.md / SYSTEM.md）、Skills（渐进披露、模型自己读 SKILL.md、`/skill:name` 显式调用、参数传递、`disable-model-invocation` 隐藏、skill 不能自己执行命令）、RPC 模式（子进程协议：prompt 出答案、状态与历史、bash 命令与退出码、未知命令不毁会话、skill 走 RPC 也生效、关掉 stdin 后仍等运行结束）、JSON 输出模式（会话头在前、事件流完整、增量拼出答案、工具调用与结果在流上、非法模式值报错）。
 
+离线测试还覆盖 profile 的严格 schema、未知字段拒绝、环境变量展开、配置覆盖优先级、
+显式空工具集、插件与 MCP 白名单、Skills/Prompt 选择、旧插件兼容、`plugin.json`
+的 `cwd`/symlink 逃逸拒绝、能力授权，以及未持久信任的项目 profile 不加载。
+
 未设置 key 时这些测试自动跳过（`t.Skip`），所以 CI 上安全。
 
 ### CI
@@ -1293,6 +1383,7 @@ go test -tags e2e -timeout 600s -v ./e2e/
 
 已完成的深化项：
 
+- **Agent 环境 profile 与插件清单**（[agentprofile/](agentprofile/)、[plugins/](plugins/)、[docs/agent-profiles.md](docs/agent-profiles.md)）：把「不同环境需要不同 Agent」变成声明式装配，而不是在启动代码里加分支。一份 profile 同时选择模型、系统提示词、turn/token 上限、工具白名单、进程插件、MCP server、Skills、Prompt 模板和上下文压缩参数；`tools`/`plugins`/`mcp_servers`/`skills`/`prompts` 区分「省略 = 全部」和「`[]` = 全不要」，工具白名单在所有工具源注册完以后最后一次生效，引用不存在的工具直接启动失败。目录插件用 `plugin.json` 描述启动命令、固定 cwd、环境变量和能力授权，`cwd`/路径型入口在 symlink 解析后不能逃出插件目录；`capabilities` 只有 `tools`/`hooks`/`events`，未授权的工具、consult hook 和推送事件分别拒绝或丢弃，旧可执行文件插件继续兼容。profile 的 `env` 只传给插件和 stdio MCP 子进程，不写回 harness 进程环境，`/profile` 只显示键不显示值。历史信任已保存的项目可以读取 `.harness/profiles/<name>.json`，首次信任仍然先判项目；用户路径和显式 profile 路径分别受支持。可见性有 REPL `/profile`、`/plugins` 和 RPC `get_profile`、`get_plugins`
 - **JSON 输出模式**（[jsonout/](jsonout/)、[cmd/harness/json.go](cmd/harness/json.go)）：`-print` 给的是答案，`--mode json` 给的是**整次运行**——这是 harness 层最后一个缺口（pi 里剩下的两个缺口：RPC 模式与 JSON 模式，都已补上）。输出是 JSONL 事件流：**第一行是会话头**（消费者看到任何事件之前就知道是哪个会话的，事件流存成文件能靠头找回会话），**最后一行是 `agent_settled`**（这一行之前没有更多自动工作，读到它就可以停）。**事件名就是 harness 自己的事件名**，消费者不用学第二套词汇——`agent_start` / `turn_start` / `request_start` / `message_start` / `message_update` / `message_end` / `tool_execution_start` / `tool_execution_end` / `agent_end`。两个设计点：`message_update` **只带增量**不带整条消息（增量多了整条消息跟着膨胀，消息本身在 `message_start` / `message_end` 里）；**推理的增量带 `"thinking": true`**，和答案的增量分开标记，否则同一个流里分不清哪段在想哪段在答。和 RPC 模式的分工：RPC 是**被驱动**的（stdin 收命令，来来回回），JSON 模式是**一次性**的（给一句提示、跑完、退出），两者共用 JSONL 分帧但记录形状不同（RPC 是「响应 + 事件」，JSON 只有「事件」）。stdout 同样归事件流所有，退出码报告运行成不成功
 - **RPC 模式**（[rpc/](rpc/)、[cmd/harness/rpc.go](cmd/harness/rpc.go)）：harness 从「人用的 REPL」变成**长驻子进程**，被别的程序用 JSON 驱动——IDE、任何语言的脚本、自制 UI 都行，这是把 harness 嵌进别人产品里的唯一入口。协议是严格的 JSONL：stdin 收命令，stdout 收响应和事件；**stdout 归协议所有**（模型文本、工具提示、诊断全改走 stderr），一个读 stdout 的客户端永远不该看到别的东西。分帧**只按 LF 切**——记录里的字符串可以含 U+2028 / U+2029（JSON 里是普通字符），按它们切会把一条记录劈成两半；CRLF 客户端也接受。**响应和事件共用一条流**，所以客户端按 **ID 关联**而不是按顺序猜（一次运行的十几个事件会插在命令的响应之间）。`prompt` 是异步的：响应只说明「收下了」（`data.disposition` = `started`），答案走事件流，客户端要等 `agent_settled`（不是 `agent_end`——一次运行后面可能还跟着重试）；**响应必须先于运行写出**，否则一个等整轮跑完再读的客户端会在写满的管道上死锁。一条坏记录不毁会话：解析失败回一条 `command: "parse"` 的失败响应，流继续；未知命令同理。**关掉 stdin 是有序关机**：harness 等在跑的那次运行结束再退出，所以「发完 prompt 立刻关 stdin」的客户端仍然拿得到答案（这里踩过一个坑：run 的 context 原本挂在 server 的 context 上，stdin 一 EOF 就把运行取消了，于是加了 `sync.WaitGroup` 单独跟踪在跑的任务）。权限层在 RPC 模式下**不弹窗**——stdin 归协议所有，审批提示会吃掉客户端的记录；模型侧的调用走「无人可问就拒绝」，客户端自己发的 `bash` 走 `user_bash` 拦截（那是用户自己的命令，不是模型的）。这个模式还逼出了两处真实缺陷：agent 的 `history` 和 `cfg` 原本**没有任何锁**，而 RPC 会在模型还在跑的时候读历史、换模型，于是补上了 mutex 和「配置按快照读」；`isTerminal(stdin)` 在 RPC 模式下为真会让权限提示去读协议流，于是 RPC 一律视为非交互
 - **Skills（Agent Skills 标准）**（[skills/](skills/)、[frontmatter/](frontmatter/)）：模板是**用户敲命令**才用的，Skills 是**模型自己按 description 决定**要不要读的——两者一起才是 pi 完整的「自己可改」。一个 skill 是一个目录 + 一个 `SKILL.md`；**渐进披露**是这一层的核心：启动时只有 `name`/`description`/`location` 进系统提示词（XML 格式），完整指示留在磁盘上，模型觉得对上了才用 `read` 去读，所以 50 个 skill 的库代价是 50 行提示词而不是 50 份文档。发现位置有四个（项目 `.harness/skills`、项目 `.agents/skills` 及其各层父目录、用户 `~/.harness/skills`、用户 `~/.agents/skills`），**先到先得**：项目在前、用户在后，项目定义的 skill 归项目，用户的目录是项目没用到的名字的兜底。`description` **必填**——它是唯一的路由信号，没有它 skill 根本不会被加载；`name` 缺省取目录名，`disable-model-invocation: true` 让 skill 只走 `/skill:name` 不进提示词；**不合规只警告不拒绝**（超长描述、非法名字照样加载），坏掉一个文件不该拖垮整个库。两个入口：模型自己 `read` 读 `SKILL.md`，或 `/skill:name [参数]` 显式把指示塞进对话（不依赖模型选不选对）。`/skills` 列出所有 skill 和来源路径。skill 的指示**跑不了任何东西**——它就是模型的输入，模型要跑脚本仍然得走工具，走同一套权限。`frontmatter/` 是抽出来的共用解析器（`prompts/` 和 `skills/` 共用一套 YAML 语义，标量 + `|`/`>` 块标量 + 转义；集合类型拒绝而不是猜），`prompts/` 里原先那份重复实现因此删掉了

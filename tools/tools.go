@@ -219,6 +219,23 @@ func (r *Registry) SetActiveTools(names []string) error {
 	return nil
 }
 
+// SetActiveToolsExact restricts exposure to exactly the named tools.
+// Unlike SetActiveTools, an empty list means no tools, which lets an
+// environment profile expose a deliberately tool-free agent.
+func (r *Registry) SetActiveToolsExact(names []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	active := map[string]bool{}
+	for _, n := range names {
+		if _, ok := r.tools[n]; !ok {
+			return fmt.Errorf("tools: cannot activate unknown tool %q", n)
+		}
+		active[n] = true
+	}
+	r.active = active
+	return nil
+}
+
 // GetAllTools returns every registered tool, sorted by name.
 func (r *Registry) GetAllTools() []*Tool {
 	r.mu.RLock()
