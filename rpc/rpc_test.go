@@ -159,10 +159,15 @@ func TestProfileAndPluginQueriesUseInjectedProviders(t *testing.T) {
 	}
 	server.Plugins = func() any {
 		return PluginsPayload{Plugins: []PluginInfo{{
-			Name:     "pdf-tools",
-			Version:  "0.1.0",
-			Selected: true,
-			State:    "loaded",
+			Name:         "pdf-tools",
+			Version:      "0.1.0",
+			Selected:     true,
+			State:        "loaded",
+			RestartMode:  "on_failure",
+			RestartCount: 2,
+			MaxRestarts:  3,
+			Healthy:      true,
+			LastExit:     "exit status 1",
 		}}}
 	}
 
@@ -182,6 +187,11 @@ func TestProfileAndPluginQueriesUseInjectedProviders(t *testing.T) {
 	catalog, ok := plugins.Data.(PluginsPayload)
 	if !ok || len(catalog.Plugins) != 1 || catalog.Plugins[0].Name != "pdf-tools" {
 		t.Fatalf("plugins payload = %#v", plugins.Data)
+	}
+	if got := catalog.Plugins[0]; got.RestartMode != "on_failure" ||
+		got.RestartCount != 2 || got.MaxRestarts != 3 ||
+		!got.Healthy || got.LastExit != "exit status 1" {
+		t.Fatalf("supervision payload = %#v", got)
 	}
 }
 

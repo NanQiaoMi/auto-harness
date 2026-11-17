@@ -396,7 +396,7 @@ func TestProcessExtensionChildIsKilledOnReload(t *testing.T) {
 	if err := mgr.Load(pe); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	cmd := pe.cmd
+	cmd := pe.currentCommand()
 	if cmd == nil || cmd.Process == nil {
 		t.Fatal("no child process")
 	}

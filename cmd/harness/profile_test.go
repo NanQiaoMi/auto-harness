@@ -244,3 +244,64 @@ func TestProfileRPCDoesNotLeakEnvironmentValues(t *testing.T) {
 		t.Fatalf("explicit empty MCP selection was lost: %#v", payload)
 	}
 }
+
+func TestPluginsPayloadReportsSupervisionHealth(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "supervised")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{
+	  "schema_version": 1,
+	  "name": "supervised",
+	  "version": "1.0.0",
+	  "command": ["python3", "plugin.py"],
+	  "supervisor": {
+	    "restart": "on_failure",
+	    "max_restarts": 5,
+	    "backoff_ms": 20,
+	    "max_backoff_ms": 100
+	  }
+	}`
+	if err := os.WriteFile(filepath.Join(dir, plugins.ManifestFile), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := `import json, sys
+manifest = {"name": "supervised"}
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "manifest":
+        print(json.dumps({"id": mid, "result": manifest}), flush=True)
+    elif method == "shutdown":
+        print(json.dumps({"id": mid, "result": {}}), flush=True)
+        break
+`
+	if err := os.WriteFile(filepath.Join(dir, "plugin.py"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := &extensionLoader{projectRoot: t.TempDir(), cfg: &config.Config{}}
+	extensions := loader.processExtensions([]string{root})
+	if len(extensions) != 1 {
+		t.Fatalf("extensions = %d, want 1", len(extensions))
+	}
+	manager := ext.NewManager(ext.NewAPI(ext.NewBus(), tools.NewRegistry(), ext.NewCommandRegistry()))
+	if err := manager.Load(extensions[0]); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	t.Cleanup(manager.Shutdown)
+
+	payload := pluginsPayload(loader, manager)
+	if len(payload.Plugins) != 1 {
+		t.Fatalf("plugins = %#v", payload.Plugins)
+	}
+	info := payload.Plugins[0]
+	if info.State != "loaded" || !info.Healthy || info.Restarting {
+		t.Fatalf("health = %#v", info)
+	}
+	if info.RestartMode != "on_failure" || info.RestartCount != 0 || info.MaxRestarts != 5 {
+		t.Fatalf("supervision = %#v", info)
+	}
+}

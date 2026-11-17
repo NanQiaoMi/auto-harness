@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writePlugin(t *testing.T, root, name, manifest string) string {
@@ -33,7 +34,13 @@ func TestManifestExtensionAndDiscovery(t *testing.T) {
 	  "command": ["python3", "plugin.py"],
 	  "cwd": "${pluginDir}/.",
 	  "env": {"TOKEN": "${PLUGIN_TOKEN}"},
-	  "capabilities": ["tools", "hooks"]
+	  "capabilities": ["tools", "hooks"],
+	  "supervisor": {
+	    "restart": "on_failure",
+	    "max_restarts": 4,
+	    "backoff_ms": 100,
+	    "max_backoff_ms": 2000
+	  }
 	}`)
 	// A legacy executable in a manifest-free directory.
 	legacyDir := filepath.Join(root, "legacy")
@@ -76,6 +83,12 @@ func TestManifestExtensionAndDiscovery(t *testing.T) {
 	}
 	if len(extension.Capabilities) != 2 || extension.Capabilities[0] != "tools" || extension.Capabilities[1] != "hooks" {
 		t.Fatalf("capabilities = %#v", extension.Capabilities)
+	}
+	if extension.RestartPolicy.Mode != "on_failure" ||
+		extension.RestartPolicy.MaxRestarts != 4 ||
+		extension.RestartPolicy.Backoff != 100*time.Millisecond ||
+		extension.RestartPolicy.MaxBackoff != 2*time.Second {
+		t.Fatalf("restart policy = %#v", extension.RestartPolicy)
 	}
 }
 
@@ -152,6 +165,56 @@ func TestManifestStrictFields(t *testing.T) {
 			_, err := ParseManifest([]byte(tc.doc))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestManifestSupervisorValidation(t *testing.T) {
+	base := `{"schema_version":1,"name":"x","version":"1","command":["x"],"supervisor":`
+	cases := []struct {
+		name       string
+		supervisor string
+		want       string
+	}{
+		{"missing mode", `{}`, "supervisor.restart"},
+		{"bad mode", `{"restart":"sometimes"}`, "must be never"},
+		{"negative restarts", `{"restart":"on_failure","max_restarts":-1}`, "between 0 and 100"},
+		{"too many restarts", `{"restart":"on_failure","max_restarts":101}`, "between 0 and 100"},
+		{"negative backoff", `{"restart":"on_failure","backoff_ms":-1}`, "backoff_ms"},
+		{"large backoff", `{"restart":"on_failure","backoff_ms":60001}`, "backoff_ms"},
+		{"negative max backoff", `{"restart":"on_failure","max_backoff_ms":-1}`, "max_backoff_ms"},
+		{"backoff inversion", `{"restart":"on_failure","backoff_ms":500,"max_backoff_ms":100}`, "must not exceed"},
+		{"unknown field", `{"restart":"on_failure","wat":true}`, "unknown field"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseManifest([]byte(base + tc.supervisor + "}"))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestManifestSupervisorDefaults(t *testing.T) {
+	zero := 0
+	cases := []struct {
+		name string
+		spec *SupervisorConfig
+		max  int
+	}{
+		{"default", &SupervisorConfig{Restart: "on_failure"}, 3},
+		{"explicit zero", &SupervisorConfig{Restart: "always", MaxRestarts: &zero}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := restartPolicy(tc.spec)
+			if policy.MaxRestarts != tc.max {
+				t.Fatalf("MaxRestarts = %d, want %d", policy.MaxRestarts, tc.max)
+			}
+			if policy.Backoff != 0 || policy.MaxBackoff != 0 {
+				t.Fatalf("unexpected duration defaults: %#v", policy)
 			}
 		})
 	}

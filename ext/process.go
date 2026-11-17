@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"sync"
 	"time"
 
@@ -51,14 +50,24 @@ type ProcessExtension struct {
 	// nil means unrestricted (legacy plugins); a non-nil list is an
 	// explicit grant.
 	Capabilities []string
+	// RestartPolicy optionally supervises the child process after it
+	// exits. The zero value preserves the historical no-restart
+	// behavior.
+	RestartPolicy RestartPolicy
 
-	mu   sync.Mutex
-	conn *rpcConn
-	cmd  *exec.Cmd
+	mu     sync.Mutex
+	run    *processRun
+	ctx    context.Context
+	cancel context.CancelFunc
 	// manifest describes the extension after the handshake.
 	manifest Manifest
 	// stopped marks the extension as shut down.
-	stopped bool
+	stopped        bool
+	supervisorDone chan struct{}
+	restartCount   int
+	restarting     bool
+	lastExit       string
+	lastError      string
 }
 
 // NewProcessExtension creates a process extension handle.
@@ -86,24 +95,26 @@ func (e *ProcessExtension) Manifest() Manifest {
 // Setup implements Extension: it starts the process, performs the
 // manifest handshake and registers the advertised tools.
 func (e *ProcessExtension) Setup(api *API) error {
-	cmd := exec.Command(e.Command, e.Args...)
-	if e.Dir != "" {
-		cmd.Dir = e.Dir
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		return fmt.Errorf("ext: %s: process was already stopped", e.Command)
 	}
-	if len(e.Env) > 0 {
-		cmd.Env = append(cmd.Environ(), e.Env...)
+	if e.run != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("ext: %s: process is already running", e.Command)
 	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("ext: %s: stdin pipe: %w", e.Command, err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("ext: %s: stdout pipe: %w", e.Command, err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("ext: %s: start: %w", e.Command, err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	e.ctx = ctx
+	e.cancel = cancel
+	e.manifest = Manifest{}
+	e.supervisorDone = nil
+	e.restartCount = 0
+	e.restarting = false
+	e.lastExit = ""
+	e.lastError = ""
+	e.mu.Unlock()
+
 	setupComplete := false
 	defer func() {
 		if !setupComplete {
@@ -111,34 +122,26 @@ func (e *ProcessExtension) Setup(api *API) error {
 		}
 	}()
 
-	conn := newRPCConn(stdout, stdin, stdin)
-	e.mu.Lock()
-	e.conn = conn
-	e.cmd = cmd
-	e.mu.Unlock()
-
-	go conn.readLoop(func(msg Protocol) {
-		e.handleNotification(api, msg)
-	})
-
-	// Handshake: ask for the manifest. A short timeout keeps a broken
-	// extension from hanging the harness.
-	var manifest Manifest
-	if err := conn.callTimeout(MethodManifest, nil, &manifest, handshakeTimeout); err != nil {
-		return fmt.Errorf("ext: %s: manifest: %w", e.Command, err)
+	run, manifest, err := e.startProcess(api)
+	if err != nil {
+		return err
 	}
-	if manifest.Name == "" {
-		manifest.Name = e.Command
-	}
-	e.mu.Lock()
-	e.manifest = manifest
-	e.mu.Unlock()
+	runAccepted := false
+	defer func() {
+		if !runAccepted {
+			terminateRun(run)
+		}
+	}()
 	if len(manifest.Tools) > 0 && !e.allows(CapabilityTools) {
 		return fmt.Errorf("ext: %s: manifest provides tools without the %q capability", e.Command, CapabilityTools)
 	}
 	if len(manifest.Consults) > 0 && !e.allows(CapabilityHooks) {
 		return fmt.Errorf("ext: %s: manifest consults events without the %q capability", e.Command, CapabilityHooks)
 	}
+	e.mu.Lock()
+	e.manifest = manifest
+	e.run = run
+	e.mu.Unlock()
 
 	// Register the remote tools as local tools.
 	for _, mt := range manifest.Tools {
@@ -185,6 +188,18 @@ func (e *ProcessExtension) Setup(api *API) error {
 		e.consult(ev)
 		return nil
 	})
+
+	done := make(chan struct{})
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		return fmt.Errorf("ext: %s: stopped during setup", e.Command)
+	}
+	e.supervisorDone = done
+	e.mu.Unlock()
+	run.accept()
+	go e.supervise(api, manifest)
+	runAccepted = true
 	setupComplete = true
 	return nil
 }
@@ -213,11 +228,17 @@ func (e *ProcessExtension) Setup(api *API) error {
 // does not name the event is never asked about it, so a policy
 // extension that predates this channel is not treated as failing.
 func (e *ProcessExtension) consult(ev *Event) {
-	conn := e.connection()
-	if conn == nil {
+	if !e.consults(ev.Type) {
 		return
 	}
-	if !e.consults(ev.Type) {
+	conn := e.connection()
+	if conn == nil {
+		// input has a safe default; every gate fails closed while the
+		// process is down or being restarted.
+		if ev.Type == EventInput {
+			return
+		}
+		e.refuse(ev, "the policy extension process is not running")
 		return
 	}
 	params := ConsultParams{
@@ -365,44 +386,50 @@ func (e *ProcessExtension) allows(capability string) bool {
 func (e *ProcessExtension) connection() *rpcConn {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopped {
+	if e.stopped || e.run == nil {
 		return nil
 	}
-	return e.conn
+	return e.run.conn
 }
 
 // Stop shuts the extension process down: it asks the child to exit and
 // kills it if it does not.
 func (e *ProcessExtension) Stop() error {
 	e.mu.Lock()
+	run := e.run
+	e.run = nil
+	cancel := e.cancel
+	supervisorDone := e.supervisorDone
+	e.restarting = false
 	if e.stopped {
 		e.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		waitSupervisor(supervisorDone)
 		return nil
 	}
 	e.stopped = true
-	conn := e.conn
-	cmd := e.cmd
 	e.mu.Unlock()
 
-	if conn != nil {
-		// Give the child a chance to clean up; closing the pipe makes the
-		// child's stdin hit EOF so it can exit on its own.
-		_ = conn.notify(MethodShutdown, nil)
-		conn.close()
+	if run != nil {
+		terminateRun(run)
 	}
-	if cmd != nil && cmd.Process != nil {
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		select {
-		case <-done:
-			return nil
-		case <-time.After(2 * time.Second):
-			// The child ignored the shutdown request; kill it.
-			_ = cmd.Process.Kill()
-			<-done
-		}
+	if cancel != nil {
+		cancel()
 	}
+	waitSupervisor(supervisorDone)
 	return nil
+}
+
+func waitSupervisor(done chan struct{}) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+	}
 }
 
 // Teardown implements the Teardown interface, so the manager releases
