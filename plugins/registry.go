@@ -3,6 +3,7 @@ package plugins
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,9 @@ import (
 const (
 	// RegistrySchemaVersion is the plugin registry document version.
 	RegistrySchemaVersion = 1
+	// RegistrySignatureAlgorithm is the only registry signature
+	// algorithm accepted by this build.
+	RegistrySignatureAlgorithm = "ed25519"
 
 	maxIndexBytes      = 4 << 20
 	maxIndexPlugins    = 256
@@ -33,7 +37,18 @@ const (
 // relative to the registry document.
 type Index struct {
 	SchemaVersion int                      `json:"schema_version"`
+	Publisher     string                   `json:"publisher,omitempty"`
 	Plugins       map[string]IndexedPlugin `json:"plugins"`
+	Signature     *IndexSignature          `json:"signature,omitempty"`
+}
+
+// IndexSignature authenticates the canonical registry payload. Artifact
+// SHA-256 values are part of the signed payload, so the signature binds
+// both the selected version metadata and the archive bytes it names.
+type IndexSignature struct {
+	Algorithm string `json:"algorithm"`
+	KeyID     string `json:"key_id"`
+	Value     string `json:"value"`
 }
 
 // IndexedPlugin describes all published versions of one plugin.
@@ -58,10 +73,21 @@ type Artifact struct {
 // Catalog is a loaded registry and the base needed to resolve its
 // relative artifact paths.
 type Catalog struct {
-	Source  string
-	index   Index
-	baseURL *url.URL
-	baseDir string
+	Source      string
+	Publisher   string
+	SignerKeyID string
+	Verified    bool
+	index       Index
+	baseURL     *url.URL
+	baseDir     string
+}
+
+// TrustPolicy supplies the publisher keys used to authenticate signed
+// registries. RequireSignature is set by callers that must not accept
+// an unsigned index.
+type TrustPolicy struct {
+	Publishers       map[string][]ed25519.PublicKey
+	RequireSignature bool
 }
 
 // ResolvedPackage is one version selected for installation.
@@ -80,6 +106,12 @@ type dependencyRequirement struct {
 // OpenCatalog loads a local path or an HTTP(S) registry document.
 // Plain HTTP is accepted only for loopback development servers.
 func OpenCatalog(source string) (*Catalog, error) {
+	return OpenCatalogWithPolicy(source, TrustPolicy{})
+}
+
+// OpenCatalogWithPolicy is OpenCatalog with registry signature
+// verification and an optional requirement that a signature exist.
+func OpenCatalogWithPolicy(source string, policy TrustPolicy) (*Catalog, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return nil, fmt.Errorf("plugin registry: source is empty")
@@ -119,18 +151,74 @@ func OpenCatalog(source string) (*Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("plugin registry: %w", err)
 	}
-	var index Index
-	if err := decodeStrictJSON(data, &index); err != nil {
+	index, err := ParseIndexDocument(data)
+	if err != nil {
 		return nil, fmt.Errorf("plugin registry: %w", err)
 	}
-	if err := validateIndex(index); err != nil {
-		return nil, fmt.Errorf("plugin registry: %w", err)
+	if index.Signature == nil {
+		if policy.RequireSignature {
+			return nil, fmt.Errorf("plugin registry: registry is unsigned")
+		}
+	} else {
+		if err := VerifyIndexSignature(&index, policy); err != nil {
+			return nil, fmt.Errorf("plugin registry: %w", err)
+		}
+		catalog.Publisher = index.Publisher
+		catalog.SignerKeyID = index.Signature.KeyID
+		catalog.Verified = true
 	}
 	catalog.index = index
 	return catalog, nil
 }
 
-func validateIndex(index Index) error {
+// ParseIndexDocument decodes and validates exactly one registry JSON
+// value. Signed documents are structurally validated here; authenticity
+// is checked when a trust policy is applied.
+func ParseIndexDocument(data []byte) (Index, error) {
+	var index Index
+	if err := decodeStrictJSON(data, &index); err != nil {
+		return Index{}, err
+	}
+	if err := validateIndex(&index); err != nil {
+		return Index{}, err
+	}
+	return index, nil
+}
+
+// MarshalIndexDocument serializes a validated registry document.
+func MarshalIndexDocument(index Index) ([]byte, error) {
+	if err := validateIndex(&index); err != nil {
+		return nil, err
+	}
+	return marshalIndent(index)
+}
+
+func validateIndex(index *Index) error {
+	if err := validateIndexPayload(index); err != nil {
+		return err
+	}
+	if index.Signature == nil {
+		if index.Publisher != "" {
+			return fmt.Errorf("publisher requires a signature")
+		}
+		return nil
+	}
+	if err := validatePublisherName(index.Publisher); err != nil {
+		return err
+	}
+	if index.Signature.Algorithm != RegistrySignatureAlgorithm {
+		return fmt.Errorf("unsupported signature algorithm %q", index.Signature.Algorithm)
+	}
+	if err := validateKeyID(index.Signature.KeyID); err != nil {
+		return fmt.Errorf("signature.key_id: %w", err)
+	}
+	if _, err := decodeSignature(index.Signature.Value); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateIndexPayload(index *Index) error {
 	if index.SchemaVersion != RegistrySchemaVersion {
 		return fmt.Errorf("unsupported schema_version %d (want %d)", index.SchemaVersion, RegistrySchemaVersion)
 	}
@@ -508,6 +596,11 @@ func validateRemoteURL(parsed *url.URL) error {
 func isHTTPURL(value string) bool {
 	lower := strings.ToLower(value)
 	return strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://")
+}
+
+// IsRemoteRegistry reports whether a registry source uses HTTP(S).
+func IsRemoteRegistry(source string) bool {
+	return isHTTPURL(strings.TrimSpace(source))
 }
 
 func normalizeSHA256(value string) (string, error) {

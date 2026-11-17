@@ -55,6 +55,10 @@ func main() {
 		pluginRemove     = flag.String("plugin-remove", "", "remove a managed plugin")
 		pluginList       = flag.Bool("plugin-list", false, "list managed plugins and exit")
 		pluginVerify     = flag.Bool("plugin-verify", false, "verify the managed plugin lock and trees")
+		pluginTrust      = flag.String("plugin-trust", "", "trust a publisher key: publisher=/path/to/public-key")
+		pluginUntrust    = flag.String("plugin-untrust", "", "remove trust for one plugin publisher")
+		pluginTrustList  = flag.Bool("plugin-trust-list", false, "list trusted plugin publishers and keys")
+		pluginUnsigned   = flag.Bool("plugin-allow-unsigned", false, "allow an unsigned remote plugin registry")
 	)
 	flag.Parse()
 
@@ -76,11 +80,15 @@ func main() {
 	}
 
 	if handled, code, err := runPluginCommand(pluginCommandOptions{
-		Index:   *pluginIndex,
-		Install: *pluginInstall,
-		Remove:  *pluginRemove,
-		List:    *pluginList,
-		Verify:  *pluginVerify,
+		Index:         *pluginIndex,
+		Install:       *pluginInstall,
+		Remove:        *pluginRemove,
+		List:          *pluginList,
+		Verify:        *pluginVerify,
+		Trust:         *pluginTrust,
+		Untrust:       *pluginUntrust,
+		TrustList:     *pluginTrustList,
+		AllowUnsigned: *pluginUnsigned,
 	}); handled {
 		if err != nil {
 			fatal(err)

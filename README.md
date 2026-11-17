@@ -32,7 +32,7 @@ ext/                  扩展系统：事件总线 + Extension API + 加载器   
   protocol.go           进程扩展的 JSON-RPC 协议（stdio）
   process.go            进程扩展客户端：握手、工具桥接、事件转发
   supervisor.go         进程级重启：生命周期上限、指数退避和健康状态
-plugins/              目录插件：plugin.json、registry/依赖解析、安全安装、锁文件校验、旧插件兼容
+plugins/              目录插件：plugin.json、签名 registry、依赖解析、安全安装、锁文件校验、旧插件兼容
 envsubst/             严格 ${NAME} / ${NAME:-默认} 展开，未定义变量直接报错
 shellext/             `!` shell 快捷：用户直接跑命令，不经过模型
   shellext.go           解析 `!` / `!!`、user_bash 事件、结果格式化
@@ -268,7 +268,9 @@ export OPENAI_API_KEY=oc_sk-...
 ./bin/harness -profile ./examples/agent-profiles/coding.json
 ./bin/harness -list-profiles
 
-# 管理插件：registry → 依赖解析 → SHA-256 校验 → 原子安装 → lockfile
+# 管理插件：签名 registry → 依赖解析 → SHA-256 校验 → 原子安装 → lockfile
+./bin/harness -plugin-trust acme=./publisher.pub
+./bin/harness -plugin-trust-list
 ./bin/harness -plugin-index ./registry.json -plugin-install pdf-tools@^1.2.0
 ./bin/harness -plugin-list
 ./bin/harness -plugin-verify
@@ -683,27 +685,59 @@ manifest 漂移或握手失败后不再重启。`/plugins` 和 RPC `get_plugins`
 `restartMode`、`restartCount` / `maxRestarts`、`healthy` / `restarting`、
 `lastExit` 和 `lastError`。旧可执行插件没有 `plugin.json`，仍保持不自动重启。
 
-### 插件 registry 与托管安装（[plugins/](plugins/)、[docs/agent-profiles.md](docs/agent-profiles.md)）
+### 插件 registry、签名与托管安装（[plugins/](plugins/)、[docs/agent-profiles.md](docs/agent-profiles.md)）
 
 手工把目录放进 `~/.harness/extensions` 只是开发方式；可分发插件走 registry。registry
 是严格 JSON，列出版本、`.tar.gz` artifact 的 SHA-256 和依赖约束。安装器用 semver
 约束解析完整依赖图（必要时回溯），在替换任何目录之前完成下载、摘要校验、安全解包、
 manifest 身份校验和整棵树摘要计算。`~/.harness/plugins/<name>` 是托管目录，
-`plugins.lock.json` 记录版本、artifact/树摘要、来源和依赖。
+`plugins.lock.json` 记录版本、artifact/树摘要、来源、publisher、签名 key ID 和依赖。
+
+发布者可给 registry 增加 `publisher` 和 Ed25519 `signature`。签名覆盖去掉
+`signature` 后的规范化 JSON，并带固定协议域；插件元数据、artifact URL 和 artifact
+SHA-256 都在签名范围内，所以信任一个 publisher 不会只保护一半分发链。公钥信任根
+默认在 `~/.harness/plugin_publishers.json`，也可用 `HARNESS_PLUGIN_TRUST_FILE`
+指定：
 
 ```bash
+go run ./cmd/plugin-registry-sign -generate-key \
+  -private-key-out publisher.pem \
+  -public-key-out publisher.pub
+
+go run ./cmd/plugin-registry-sign \
+  -index ./registry.json \
+  -publisher acme \
+  -key publisher.pem \
+  -out ./registry.signed.json
+
+./bin/harness -plugin-trust acme=publisher.pub
+./bin/harness -plugin-trust-list
+./bin/harness -plugin-untrust acme
+
 ./bin/harness \
   -plugin-index https://plugins.example.com/index.json \
   -plugin-install pdf-tools@^1.2.0
+./bin/harness -plugin-list
 ./bin/harness -plugin-verify
 ./bin/harness -plugin-remove pdf-tools
 ```
 
+密钥生成不会覆盖已有文件，私钥权限为 `0600`。如果改用 OpenSSL，需要 OpenSSL 3；
+macOS 自带的部分 LibreSSL 版本不支持 Ed25519。也可以把 `publisher.pub` 的 PEM
+内容作为公钥输入，签名工具和信任命令都只接受 Ed25519。
+
 `-plugin-verify` 会重算每个目录树的摘要、检查锁定的依赖版本，并报告 lockfile 之外的
 手工托管插件目录。卸载会拒绝删除仍被其他托管插件依赖的包。归档拒绝绝对路径、`..`、
 链接、设备文件、重复路径和超限内容；远程 registry 只接受 HTTPS，明文 HTTP 仅允许
-loopback 开发服务器。SHA-256 保证下载物和注册表声明一致，**不等于发布者签名**；
-签名、publisher 身份和自动更新仍未实现。
+loopback 开发服务器。远程 registry 默认必须带受信任的 publisher 签名；只有显式传
+`-plugin-allow-unsigned` 才允许降级并打印警告。本地 registry 可以继续不签名，方便
+离线开发；签名 registry 如果 key 不在信任根里仍会被拒绝。`-plugin-list` 显示
+publisher，未签名安装显示 `unsigned`。
+
+lockfile schema 2 会保存安装时的 `publisher` / `signer_key_id`；旧 schema 1 仍可
+读取，并在下一次写入时升级。lockfile 本身没有签名，不是不可篡改的安装历史。Ed25519
+签名认证的是 registry 元数据和 artifact 摘要，不是运行时沙箱；密钥吊销、过期、
+anti-rollback/freshness、自动更新和回滚通道仍是后续工作。
 
 ### 热重载
 
@@ -1412,9 +1446,10 @@ go test -tags e2e -timeout 600s -v ./e2e/
 
 离线测试还覆盖 profile 的严格 schema、未知字段拒绝、环境变量展开、配置覆盖优先级、
 显式空工具集、插件与 MCP 白名单、Skills/Prompt 选择、旧插件兼容、`plugin.json`
-的 `cwd`/symlink 逃逸拒绝、能力授权、plugin registry 的 semver/依赖回溯、归档逃逸、
-SHA-256 与树摘要、升级/卸载事务和 lockfile 校验、进程重启的生命周期计数与 manifest
-不变性、重启空窗期的 fail-closed，以及未持久信任的项目 profile 不加载。
+的 `cwd`/symlink 逃逸拒绝、能力授权、plugin registry 的 semver/依赖回溯、Ed25519
+签名与协议域、篡改/未信任 key 拒绝、发布者信任库、远程未签名默认拒绝、归档逃逸、
+SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校验、进程重启的生命周期
+计数与 manifest 不变性、重启空窗期的 fail-closed，以及未持久信任的项目 profile 不加载。
 
 未设置 key 时这些测试自动跳过（`t.Skip`），所以 CI 上安全。
 
@@ -1431,7 +1466,8 @@ SHA-256 与树摘要、升级/卸载事务和 lockfile 校验、进程重启的�
 
 已完成的深化项：
 
-- **插件 registry、依赖解析与托管安装**（[plugins/](plugins/)、[cmd/harness/plugins_cli.go](cmd/harness/plugins_cli.go)）：插件从“手工拷贝目录”升级为可审计分发单元。registry 文档声明版本、artifact SHA-256 和依赖约束；解析器选最高兼容版本并支持回溯，安装器先把完整依赖图下载/校验/解包到 stage，再原子替换 `~/.harness/plugins/<name>`，最后写 `plugins.lock.json`。lock 记录版本、artifact digest、完整目录树 digest、来源和依赖；`-plugin-verify` 重算目录树、检查依赖版本并找出未入锁的托管插件，`-plugin-remove` 拒绝破坏仍被依赖的包。tar 解包拒绝绝对路径、目录穿越、链接、设备、重复路径和资源超限；远程 registry 仅 HTTPS（明文 HTTP 只给 loopback 开发），本地 registry 可离线使用。SHA-256 是完整性和一致性校验，不是 publisher 签名
+- **插件 registry、依赖解析与托管安装**（[plugins/](plugins/)、[cmd/harness/plugins_cli.go](cmd/harness/plugins_cli.go)）：插件从“手工拷贝目录”升级为可审计分发单元。registry 文档声明版本、artifact SHA-256 和依赖约束；解析器选最高兼容版本并支持回溯，安装器先把完整依赖图下载/校验/解包到 stage，再原子替换 `~/.harness/plugins/<name>`，最后写 `plugins.lock.json`。lock 记录版本、artifact digest、完整目录树 digest、来源、publisher、签名 key ID 和依赖；`-plugin-verify` 重算目录树、检查依赖版本并找出未入锁的托管插件，`-plugin-remove` 拒绝破坏仍被依赖的包。tar 解包拒绝绝对路径、目录穿越、链接、设备、重复路径和资源超限；远程 registry 仅 HTTPS（明文 HTTP 只给 loopback 开发），本地 registry 可离线使用
+- **Ed25519 registry 签名与发布者信任根**（[plugins/signing.go](plugins/signing.go)、[plugins/keys.go](plugins/keys.go)、[cmd/plugin-registry-sign/](cmd/plugin-registry-sign/)）：registry 用 `ed25519` + 公钥 SHA-256 `key_id` 声明 publisher，签名覆盖带协议域的规范化元数据、artifact URL 和 artifact 摘要，因此无法只替换下载地址或版本说明绕过认证。信任根默认是 `~/.harness/plugin_publishers.json`（可用 `HARNESS_PLUGIN_TRUST_FILE` 覆盖），只保存原始 Ed25519 公钥；`-plugin-trust` / `-plugin-untrust` / `-plugin-trust-list` 管理它。远程 registry 默认拒绝未签名文档，本地未签名 registry 仍可用于离线开发，`-plugin-allow-unsigned` 是显式且带警告的远程降级。lockfile schema 2 保存 publisher / key ID，兼容旧 schema 1；lockfile 本身不是签名账本，吊销、过期、anti-rollback/freshness 和自动更新仍未实现。签名解决发布者认证，不替代运行时沙箱或权限模型
 - **插件进程监督与健康可见性**（[ext/supervisor.go](ext/supervisor.go)、[plugins/plugins.go](plugins/plugins.go)）：插件可在 `plugin.json` 显式启用 `never` / `on_failure` / `always` 进程恢复，`max_restarts` 按扩展实例生命周期累计成功替换次数（默认 3，最大 100），初始退避默认 250ms、指数增长到默认 30s 上限。每次重启都重新握手，运行时 manifest 必须与首次批准时完全一致，禁止靠崩溃增加工具或削掉 consult 授权；预算耗尽、manifest 漂移或握手失败后停止。重启空窗期工具调用报错，所有策略 gate fail-closed，`input` 保持原样；`/plugins` 与 `get_plugins` 暴露状态、计数、最近退出和错误。它是进程恢复而非 checkpoint：子进程从零开始，不续跑未完成任务
 - **Agent 环境 profile 与插件清单**（[agentprofile/](agentprofile/)、[plugins/](plugins/)、[docs/agent-profiles.md](docs/agent-profiles.md)）：把「不同环境需要不同 Agent」变成声明式装配，而不是在启动代码里加分支。一份 profile 同时选择模型、系统提示词、turn/token 上限、工具白名单、进程插件、MCP server、Skills、Prompt 模板和上下文压缩参数；`tools`/`plugins`/`mcp_servers`/`skills`/`prompts` 区分「省略 = 全部」和「`[]` = 全不要」，工具白名单在所有工具源注册完以后最后一次生效，引用不存在的工具直接启动失败。目录插件用 `plugin.json` 描述启动命令、固定 cwd、环境变量和能力授权，`cwd`/路径型入口在 symlink 解析后不能逃出插件目录；`capabilities` 只有 `tools`/`hooks`/`events`，未授权的工具、consult hook 和推送事件分别拒绝或丢弃，旧可执行文件插件继续兼容。profile 的 `env` 只传给插件和 stdio MCP 子进程，不写回 harness 进程环境，`/profile` 只显示键不显示值。历史信任已保存的项目可以读取 `.harness/profiles/<name>.json`，首次信任仍然先判项目；用户路径和显式 profile 路径分别受支持。可见性有 REPL `/profile`、`/plugins` 和 RPC `get_profile`、`get_plugins`
 - **JSON 输出模式**（[jsonout/](jsonout/)、[cmd/harness/json.go](cmd/harness/json.go)）：`-print` 给的是答案，`--mode json` 给的是**整次运行**——这是 harness 层最后一个缺口（pi 里剩下的两个缺口：RPC 模式与 JSON 模式，都已补上）。输出是 JSONL 事件流：**第一行是会话头**（消费者看到任何事件之前就知道是哪个会话的，事件流存成文件能靠头找回会话），**最后一行是 `agent_settled`**（这一行之前没有更多自动工作，读到它就可以停）。**事件名就是 harness 自己的事件名**，消费者不用学第二套词汇——`agent_start` / `turn_start` / `request_start` / `message_start` / `message_update` / `message_end` / `tool_execution_start` / `tool_execution_end` / `agent_end`。两个设计点：`message_update` **只带增量**不带整条消息（增量多了整条消息跟着膨胀，消息本身在 `message_start` / `message_end` 里）；**推理的增量带 `"thinking": true`**，和答案的增量分开标记，否则同一个流里分不清哪段在想哪段在答。和 RPC 模式的分工：RPC 是**被驱动**的（stdin 收命令，来来回回），JSON 模式是**一次性**的（给一句提示、跑完、退出），两者共用 JSONL 分帧但记录形状不同（RPC 是「响应 + 事件」，JSON 只有「事件」）。stdout 同样归事件流所有，退出码报告运行成不成功

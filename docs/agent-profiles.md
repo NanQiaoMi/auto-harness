@@ -321,11 +321,13 @@ selects the highest satisfying release for the requested plugin and
 all transitive dependencies, backtracking when two packages impose
 different constraints.
 
-The registry document is strict JSON:
+The registry document is strict JSON. A signed registry adds a stable
+publisher and an Ed25519 signature:
 
 ```json
 {
   "schema_version": 1,
+  "publisher": "acme",
   "plugins": {
     "pdf-tools": {
       "description": "PDF extraction and conversion",
@@ -341,9 +343,53 @@ The registry document is strict JSON:
         }
       }
     }
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "ed25519:<sha256-of-public-key>",
+    "value": "<base64-signature>"
   }
 }
 ```
+
+The signature covers canonical JSON with the `signature` field removed,
+prefixed by the fixed registry-signature protocol domain. Publisher,
+plugin metadata, artifact URLs, artifact SHA-256 values and dependency
+constraints are all authenticated as one document. `key_id` is the
+lowercase SHA-256 fingerprint of the raw Ed25519 public key.
+
+Create and trust a publisher key with the included signer. Key
+generation refuses to overwrite existing files and writes the private
+key with mode `0600`. The signer accepts a PKCS#8 PEM Ed25519 private
+key; the trust command accepts a PKIX PEM public key or its raw base64
+form.
+
+```bash
+go run ./cmd/plugin-registry-sign -generate-key \
+  -private-key-out publisher.pem \
+  -public-key-out publisher.pub
+go run ./cmd/plugin-registry-sign \
+  -index ./registry.json \
+  -publisher acme \
+  -key publisher.pem \
+  -out ./registry.signed.json
+
+./bin/harness -plugin-trust acme=publisher.pub
+./bin/harness -plugin-trust-list
+./bin/harness -plugin-untrust acme
+```
+
+OpenSSL 3 can generate the same key formats, but some LibreSSL versions
+shipped with macOS do not support Ed25519.
+
+The trust root defaults to `~/.harness/plugin_publishers.json`;
+`HARNESS_PLUGIN_TRUST_FILE` overrides the path. It stores public keys
+only. A remote HTTP(S) registry must be signed by a trusted publisher
+unless the caller explicitly passes `-plugin-allow-unsigned`, which
+prints a warning. Local registry files may remain unsigned for offline
+development. A signed local or remote registry with an unknown
+publisher, unknown key ID, altered payload or invalid signature is
+rejected.
 
 An artifact URL resolves relative to the registry document. Local
 registry files may reference local artifacts; remote registries may
@@ -354,27 +400,36 @@ directory.
 
 Installation is transactional and fail-closed:
 
-1. Resolve the complete dependency set.
-2. Download/read and SHA-256-check every artifact before extraction.
-3. Reject absolute paths, traversal, duplicate paths, links, devices,
+1. Apply the registry trust policy and verify the signature before
+   trusting any metadata.
+2. Resolve the complete dependency set.
+3. Download/read and SHA-256-check every artifact before extraction.
+4. Reject absolute paths, traversal, duplicate paths, links, devices,
    oversized archives and oversized expanded trees.
-4. Verify each manifest name/version matches the registry release.
-5. Compute a deterministic digest of each complete plugin tree.
-6. Stage every replacement before swapping managed directories.
-7. Write the lockfile last; any commit failure restores the previous
+5. Verify each manifest name/version matches the registry release.
+6. Compute a deterministic digest of each complete plugin tree.
+7. Stage every replacement before swapping managed directories.
+8. Write the lockfile last; any commit failure restores the previous
    directories.
 
-`~/.harness/plugins/plugins.lock.json` records the version, artifact
-digest, tree digest, registry source and dependency constraints.
+`~/.harness/plugins/plugins.lock.json` schema 2 records the version,
+artifact digest, tree digest, registry source, publisher, signer key
+ID and dependency constraints. Schema 1 lockfiles remain readable and
+are upgraded on the next write. The lockfile is not itself signed, so
+it is provenance metadata rather than tamper-evident history.
 `-plugin-verify` recomputes every tree digest, checks locked dependency
 versions and reports manifest directories not present in the lock.
 `-plugin-remove` refuses to remove a plugin another managed plugin
 still depends on.
 
 SHA-256 proves that the downloaded artifact and installed tree match
-the registry metadata. It does **not** prove who published the
-registry. Signed registries, publisher identity, automatic updates and
-rollback channels remain separate security work.
+the registry metadata. Ed25519 registry signatures additionally prove
+which trusted publisher signed that metadata and its artifact digests.
+They do **not** sandbox plugin code, revoke a compromised key, prove
+that a fresh registry is newer than a previously seen one, or provide
+automatic updates and rollback channels. Key revocation/expiry,
+anti-rollback/freshness and registry-driven update policy remain
+separate security and lifecycle work.
 
 ## Assembly order
 
@@ -425,9 +480,10 @@ instead of half-loading the new one.
 
 ## Deliberate boundaries
 
-This layer now provides registry-based installation, dependency
-resolution and tree verification. It does not yet provide registry
-signatures, publisher identity, automatic updates, a registry UI,
+This layer now provides registry-based installation, Ed25519 publisher
+authentication, dependency resolution and tree verification. It does
+not yet provide key revocation/expiry, registry anti-rollback or
+freshness policy, automatic updates, rollback channels, a registry UI,
 per-profile sandbox policy, multi-tenant quotas or task
 checkpoint/resume. Those need separate security and lifecycle work. The
 current contract remains inspectable composition with the existing

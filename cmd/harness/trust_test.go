@@ -15,6 +15,7 @@ func isolateHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("HARNESS_PLUGIN_TRUST_FILE", "")
 	return home
 }
 
