@@ -220,6 +220,100 @@ Built-in Go extensions and `config.json`'s `extension_command` are base
 runtime, not catalog plugins: the profile allowlist applies to plugins
 found in the user, project and `plugin_dirs` discovery roots.
 
+## Registry installation and lockfile
+
+Managed plugins are installed below `~/.harness/plugins/<name>` and
+discovered in the same user-trusted scope as `~/.harness/extensions`.
+A profile still has to select a plugin by name; installation does not
+activate it automatically.
+
+```bash
+# Local registry document
+./bin/harness \
+  -plugin-index ./registry.json \
+  -plugin-install pdf-tools@^1.2.0
+
+# HTTPS registry
+./bin/harness \
+  -plugin-index https://plugins.example.com/index.json \
+  -plugin-install pdf-tools
+
+./bin/harness -plugin-list
+./bin/harness -plugin-verify
+./bin/harness -plugin-remove pdf-tools
+```
+
+`HARNESS_PLUGIN_INDEX` supplies the default registry source. `@` takes
+an exact version or one of these constraints:
+
+```text
+*
+1.2.3
+>=1.0.0 <2.0.0
+^1.2.3       >=1.2.3 and <2.0.0
+~1.2.3       >=1.2.3 and <1.3.0
+```
+
+Versions are stable `MAJOR.MINOR.PATCH` values. Dependency resolution
+selects the highest satisfying release for the requested plugin and
+all transitive dependencies, backtracking when two packages impose
+different constraints.
+
+The registry document is strict JSON:
+
+```json
+{
+  "schema_version": 1,
+  "plugins": {
+    "pdf-tools": {
+      "description": "PDF extraction and conversion",
+      "versions": {
+        "1.2.0": {
+          "artifact": {
+            "url": "artifacts/pdf-tools-1.2.0.tar.gz",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "dependencies": {
+            "shared-runtime": ">=1.0.0 <2.0.0"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+An artifact URL resolves relative to the registry document. Local
+registry files may reference local artifacts; remote registries may
+reference HTTPS artifacts. Plain HTTP is accepted only for loopback
+development servers. Artifacts are `.tar.gz` archives with
+`plugin.json` either at the archive root or inside one top-level
+directory.
+
+Installation is transactional and fail-closed:
+
+1. Resolve the complete dependency set.
+2. Download/read and SHA-256-check every artifact before extraction.
+3. Reject absolute paths, traversal, duplicate paths, links, devices,
+   oversized archives and oversized expanded trees.
+4. Verify each manifest name/version matches the registry release.
+5. Compute a deterministic digest of each complete plugin tree.
+6. Stage every replacement before swapping managed directories.
+7. Write the lockfile last; any commit failure restores the previous
+   directories.
+
+`~/.harness/plugins/plugins.lock.json` records the version, artifact
+digest, tree digest, registry source and dependency constraints.
+`-plugin-verify` recomputes every tree digest, checks locked dependency
+versions and reports manifest directories not present in the lock.
+`-plugin-remove` refuses to remove a plugin another managed plugin
+still depends on.
+
+SHA-256 proves that the downloaded artifact and installed tree match
+the registry metadata. It does **not** prove who published the
+registry. Signed registries, publisher identity, automatic updates and
+rollback channels remain separate security work.
+
 ## Assembly order
 
 The order is deliberate:
@@ -269,8 +363,10 @@ instead of half-loading the new one.
 
 ## Deliberate boundaries
 
-This layer does not yet provide remote plugin installation, signatures,
-a registry UI, plugin dependency resolution, automatic supervisor
-restart, per-profile sandbox policy, or multi-tenant quotas. Those need
-separate security and lifecycle work. The current contract is local,
-inspectable composition with the existing trust and permission model.
+This layer now provides registry-based installation, dependency
+resolution and tree verification. It does not yet provide registry
+signatures, publisher identity, automatic updates, a registry UI,
+automatic supervisor restart, per-profile sandbox policy, or
+multi-tenant quotas. Those need separate security and lifecycle work.
+The current contract remains inspectable composition with the existing
+trust and permission model.
