@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/NanQiaoMi/auto-harness/agent"
 	"github.com/NanQiaoMi/auto-harness/config"
+	"github.com/NanQiaoMi/auto-harness/contextmgr"
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/perm"
@@ -293,27 +295,89 @@ func main() {
 	promptSetup := loadPrompts(cfg, workdir(), trustSetup.decision.Trusted)
 	skillSetup := loadSkills(cfg, workdir(), trustSetup.decision.Trusted)
 
+	contextOpts := contextmgr.Options{}
+	configuredWindow := 0
+	if cfg.Context != nil {
+		configuredWindow = cfg.Context.Window
+		contextOpts.ContextWindow = configuredWindow
+		contextOpts.ReserveTokens = cfg.Context.ReserveTokens
+		contextOpts.CompactAt = cfg.Context.CompactAt
+		contextOpts.KeepRecentTokens = cfg.Context.KeepRecentTokens
+		contextOpts.KeepRecentMessages = cfg.Context.KeepRecentMessages
+		contextOpts.SummaryMaxTokens = cfg.Context.SummaryMaxTokens
+		contextOpts.SummaryChunkTokens = cfg.Context.SummaryChunkTokens
+		contextOpts.ArtifactThreshold = cfg.Context.ArtifactThreshold
+		contextOpts.ArtifactPreview = cfg.Context.ArtifactPreview
+	}
+	if cfg.MaxTokens > 0 {
+		contextOpts.MaxOutputTokens = cfg.MaxTokens
+	}
+
 	ag := agent.New(agent.Config{
 		Provider: provider,
 		Model:    cfg.Model,
 		// The project context files fold into the system prompt, and
 		// the skills are advertised in it.
-		SystemPrompt: skillSetup.systemPrompt(promptSetup.systemPrompt(cfg.SystemPrompt)),
-		MaxTokens:    cfg.MaxTokens,
-		MaxTurns:     cfg.MaxTurns,
+		SystemPrompt:  skillSetup.systemPrompt(promptSetup.systemPrompt(cfg.SystemPrompt)),
+		MaxTokens:     cfg.MaxTokens,
+		ContextWindow: configuredWindow,
+		MaxTurns:      cfg.MaxTurns,
+		ContextBudget: func(modelID string) (int, int) {
+			if info, ok := llmReg.Model(modelID); ok {
+				return info.ContextWindow, info.MaxOutput
+			}
+			return 0, 0
+		},
 		// Resolve the provider per model so /model can cross providers.
 		Resolver: func(modelID string) (llm.Provider, error) {
 			return llmReg.ProviderFor(modelID, "")
 		},
 	}, bus, registry)
 	ag.Session = sess
-	ag.Compactor = agent.NewSummarizer(provider, cfg.Model)
+	ag.Compactor = func(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
+		model := ag.Config().Model
+		current, err := llmReg.ProviderFor(model, "")
+		if err != nil {
+			return nil, err
+		}
+		return agent.NewSummarizer(current, model)(ctx, messages)
+	}
 	ag.Logf = func(format string, args ...any) {
 		if !*quiet {
 			fmt.Fprintf(os.Stderr, "[hook] "+format+"\n", args...)
 		}
 	}
 	ag.SetHistory(sess.Messages)
+
+	// Context budgeting and automatic compression are part of the
+	// runtime, not a one-off command. The manager estimates each
+	// provider request, summarizes old units, and moves oversized tool
+	// output into the session's artifact store when needed.
+	artifactDir := ""
+	if cfg.Context != nil {
+		artifactDir = cfg.Context.ArtifactDir
+	}
+	if artifactDir == "" {
+		sessionDir := cfg.SessionDir
+		if sessionDir == "" {
+			sessionDir = filepath.Dir(sess.Path)
+		}
+		artifactDir = filepath.Join(sessionDir, "artifacts", sess.Meta.ID)
+	}
+	contextMgr := contextmgr.NewManager(
+		contextOpts,
+		nil,
+		contextmgr.SummarizerFunc(func(ctx context.Context, messages []llm.Message, maxTokens int) (string, error) {
+			model := ag.Config().Model
+			p, err := llmReg.ProviderFor(model, "")
+			if err != nil {
+				return "", err
+			}
+			return contextmgr.SummarizeOnce(ctx, p, model, messages, maxTokens)
+		}),
+		contextmgr.NewFileArtifactStore(artifactDir),
+	)
+	ag.SetContextManager(contextMgr)
 
 	// The "!" shortcut runs the user's own shell commands, through the
 	// same bash tool, so the sandbox applies to them too.
@@ -620,6 +684,43 @@ func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, ses
 				return err
 			}
 			fmt.Printf("compacted: %d -> %d messages\n", before, len(ag.History()))
+			return nil
+		},
+	})
+	commands.Register("context", &ext.Command{
+		Description: "show the context budget, estimate and last automatic compaction",
+		Handler: func(ctx context.Context, args string) error {
+			status, ok := ag.ContextStatus()
+			if !ok {
+				fmt.Println("context manager: not configured")
+				return nil
+			}
+			percent := 0.0
+			if status.PromptBudget > 0 {
+				percent = float64(status.EstimatedTokens) / float64(status.PromptBudget) * 100
+			}
+			fmt.Printf("model:               %s\n", status.Model)
+			fmt.Printf("context window:      %d tokens\n", status.ContextWindow)
+			fmt.Printf("output reservation:  %d tokens\n", status.MaxOutputTokens)
+			fmt.Printf("prompt budget:       %d tokens (%d safety reserve)\n",
+				status.PromptBudget, status.ReserveTokens)
+			fmt.Printf("current estimate:    %d tokens (%.1f%% of budget)\n",
+				status.EstimatedTokens, percent)
+			fmt.Printf("automatic compact:   %.0f%% of budget (%d tokens)\n",
+				status.CompactAt*100, status.CompactThresholdTokens)
+			fmt.Printf("recent history:      %d tokens / at least %d units\n",
+				status.KeepRecentTokens, status.KeepRecentMessages)
+			fmt.Printf("summary completion:  %d tokens\n", status.SummaryMaxTokens)
+			if status.ArtifactDir != "" {
+				fmt.Printf("artifact directory:  %s\n", status.ArtifactDir)
+			}
+			if last := status.LastCompaction; last != nil {
+				fmt.Printf("last auto compact:   %d -> %d tokens, %d artifact(s), summary %d bytes, %s\n",
+					last.TokensBefore, last.TokensAfter, last.Artifacts,
+					last.SummaryBytes, last.At.Local().Format("2006-01-02 15:04:05"))
+			} else {
+				fmt.Println("last auto compact:   none in this process")
+			}
 			return nil
 		},
 	})
