@@ -832,10 +832,24 @@ Git 仓库内默认启用工作区检查点：每次**修改型工具调用之�
 ```text
 /checkpoints                 # 最近的检查点，带 [current] / safety 标记
 /checkpoints create before-refactor
-/rewind                      # 回到当前状态之前的下一个检查点
+/rewind                      # 只回退工作区：回到当前状态之前的下一个检查点
 /rewind 2                    # 显式选择列表第 2 项
-/undo                        # /rewind 的别名
+/undo                        # 整回合撤销：工作区 + 会话分支回到本回合开始前
+/undo 2                      # 显式选择第 2 个检查点并撤销到它的回合边界
 ```
+
+`/rewind` 和 `/undo` 的区别是“工作区”与“工作区 + 对话”：
+
+- `/rewind` 只恢复 Git 工作树、index、HEAD/refs 和 stash，会话历史不变。
+- `/undo` 在同样恢复工作区之后，把会话 leaf 移到该检查点绑定的
+  **本轮用户消息之前**。这样不会留下一条没有 tool result 的 assistant
+  tool call，模型也不会继续记得已被撤销的步骤。
+- 一个回合可能有多次工具调用；`/undo` 选该回合**最早**的检查点，
+  所以会回到第一次修改之前，而不是只撤销最后一次。只读回合没有工作区
+  检查点时，仍然只移动会话并明确报告 `workspace unchanged`。
+- 只有绑定了当前会话的检查点能整回合撤销；旧检查点没有 `sessionId` 时
+  仍可用 `/rewind`。每次 `/undo` 会先建 safety 检查点，所以
+  `/undo <safety-id>` 可以 redo。
 
 每个检查点保存：非忽略工作树、**精确 index**（包括 merge 冲突 stage）、
 HEAD/分支/detached 状态、本地分支/tag/远程跟踪 ref 等普通 refs，以及
@@ -1044,7 +1058,7 @@ REPL 是给人用的。要把 harness 嵌进 IDE、脚本（任何语言）或�
 | `get_plugins` | — | 已发现插件的名称、版本、路径、是否被 profile 选择和加载状态 |
 | `get_checkpoints` | — | 工作区检查点，最新在前，带 `current` / `differs` 标记 |
 | `create_checkpoint` | `label?` | 手动创建一个工作区检查点 |
-| `rewind_checkpoint` | `checkpoint?`, `resetHead?` | 恢复检查点；省略 `checkpoint` 时回退到上一个更旧状态，`resetHead` 默认 `true` |
+| `rewind_checkpoint` | `checkpoint?`, `resetHead?`, `restoreContext?` | 恢复检查点；省略 `checkpoint` 时回退到上一个更旧状态，`resetHead` 默认 `true`；`restoreContext:true` 同时把会话移回该检查点的回合边界（与 `resetHead:false` 互斥）；运行中的 prompt 结束前拒绝恢复 |
 | `fork` / `clone` | `entryId` | 分叉会话 |
 
 **`prompt` 是异步的**：响应只说明「收下了」，答案在事件流里。客户端要等
@@ -1517,7 +1531,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 已完成的深化项：
 
-- **内置 Git 与逐步工作区回退**（[gitkit/](gitkit/)、[docs/git-checkpoints.md](docs/git-checkpoints.md)）：Git 从“让模型跑 shell”变成内核工具。`git` 用参数数组直接执行，不经过 shell，支持 stdin、仓库内 workdir 和非交互环境；`checkpoint` 保存非忽略工作树、精确 index（含 merge 冲突 stage）、HEAD/分支/detached、普通 refs、stash 栈与 reflog。默认在每个修改型工具和用户 `!` / RPC `bash` 前自动快照，快照失败则拒绝执行；只读工具和只读 Git 子命令跳过。恢复前先建独立 safety 检查点，所以 `/rewind` 本身也能撤回；空选择器只向更旧状态走，不因 safety 快照向前跳。跨分支恢复会做 worktree 占用检查；恢复失败会尝试回滚到 safety。边界明确：忽略文件、`.git/config`、hooks、`FETCH_HEAD`、非 stash reflog、submodule 工作树、未验证的 LFS 行为和工作区外副作用不在恢复范围；快照可能包含未跟踪文件里的密钥，镜像推送 `refs/harness/*` 会带走它们
+- **内置 Git、逐步工作区回退与整回合撤销**（[gitkit/](gitkit/)、[docs/git-checkpoints.md](docs/git-checkpoints.md)）：Git 从“让模型跑 shell”变成内核工具。`git` 用参数数组直接执行，不经过 shell，支持 stdin、仓库内 workdir 和非交互环境；`checkpoint` 保存非忽略工作树、精确 index（含 merge 冲突 stage）、HEAD/分支/detached、普通 refs、stash 栈与 reflog。默认在每个修改型工具和用户 `!` / RPC `bash` 前自动快照，快照失败则拒绝执行；只读工具和只读 Git 子命令跳过。检查点记录所属 session、回合 ID 和会话锚点：`/rewind` 只恢复工作区，`/undo` 选择当前回合最早的快照，把工作区和会话 leaf 一起退回第一次修改之前，旧 assistant tool call 不会悬空；同一锚点下的不同分支靠回合 ID 区分，只读回合则只移动会话并明确警告。`restoreContext:true` 在 RPC 中提供同样语义，运行中的 prompt 结束前拒绝恢复与 `new_session`。恢复前先建独立 safety 检查点，所以 `/undo` 本身也能撤回，`/undo <safety-id>` 就是 redo；空选择器不会被 safety 快照带着向前跳。跨分支恢复会做 worktree 占用检查；恢复失败会尝试回滚到 safety，会话移动失败也会回滚工作区。边界明确：忽略文件、`.git/config`、hooks、`FETCH_HEAD`、非 stash reflog、submodule 工作树、未验证的 LFS 行为、进程内存、运行中的请求和工作区外副作用不在恢复范围；快照可能包含未跟踪文件里的密钥，镜像推送 `refs/harness/*` 会带走它们
 - **插件 registry、依赖解析与托管安装**（[plugins/](plugins/)、[cmd/harness/plugins_cli.go](cmd/harness/plugins_cli.go)）：插件从“手工拷贝目录”升级为可审计分发单元。registry 文档声明版本、artifact SHA-256 和依赖约束；解析器选最高兼容版本并支持回溯，安装器先把完整依赖图下载/校验/解包到 stage，再原子替换 `~/.harness/plugins/<name>`，最后写 `plugins.lock.json`。lock 记录版本、artifact digest、完整目录树 digest、来源、publisher、签名 key ID 和依赖；`-plugin-verify` 重算目录树、检查依赖版本并找出未入锁的托管插件，`-plugin-remove` 拒绝破坏仍被依赖的包。tar 解包拒绝绝对路径、目录穿越、链接、设备、重复路径和资源超限；远程 registry 仅 HTTPS（明文 HTTP 只给 loopback 开发），本地 registry 可离线使用
 - **Ed25519 registry 签名与发布者信任根**（[plugins/signing.go](plugins/signing.go)、[plugins/keys.go](plugins/keys.go)、[cmd/plugin-registry-sign/](cmd/plugin-registry-sign/)）：registry 用 `ed25519` + 公钥 SHA-256 `key_id` 声明 publisher，签名覆盖带协议域的规范化元数据、artifact URL 和 artifact 摘要，因此无法只替换下载地址或版本说明绕过认证。信任根默认是 `~/.harness/plugin_publishers.json`（可用 `HARNESS_PLUGIN_TRUST_FILE` 覆盖），只保存原始 Ed25519 公钥；`-plugin-trust` / `-plugin-untrust` / `-plugin-trust-list` 管理它。远程 registry 默认拒绝未签名文档，本地未签名 registry 仍可用于离线开发，`-plugin-allow-unsigned` 是显式且带警告的远程降级。lockfile schema 2 保存 publisher / key ID，兼容旧 schema 1；lockfile 本身不是签名账本，吊销、过期、anti-rollback/freshness 和自动更新仍未实现。签名解决发布者认证，不替代运行时沙箱或权限模型
 - **插件进程监督与健康可见性**（[ext/supervisor.go](ext/supervisor.go)、[plugins/plugins.go](plugins/plugins.go)）：插件可在 `plugin.json` 显式启用 `never` / `on_failure` / `always` 进程恢复，`max_restarts` 按扩展实例生命周期累计成功替换次数（默认 3，最大 100），初始退避默认 250ms、指数增长到默认 30s 上限。每次重启都重新握手，运行时 manifest 必须与首次批准时完全一致，禁止靠崩溃增加工具或削掉 consult 授权；预算耗尽、manifest 漂移或握手失败后停止。重启空窗期工具调用报错，所有策略 gate fail-closed，`input` 保持原样；`/plugins` 与 `get_plugins` 暴露状态、计数、最近退出和错误。它是进程恢复而非 checkpoint：子进程从零开始，不续跑未完成任务
