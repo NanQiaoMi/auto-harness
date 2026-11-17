@@ -201,21 +201,27 @@ func Load() (*Config, error) {
 	if cfg.Provider == "" {
 		cfg.Provider = llm.GuessProvider(cfg.Model)
 	}
-	if cfg.BaseURL == "" {
-		if cfg.Provider == "anthropic" {
-			cfg.BaseURL = os.Getenv("ANTHROPIC_BASE_URL")
-		} else {
-			cfg.BaseURL = os.Getenv("OPENAI_BASE_URL")
-		}
-	}
-	if cfg.APIKey == "" {
-		if cfg.Provider == "anthropic" {
-			cfg.APIKey = os.Getenv("ANTHROPIC_API_KEY")
-		} else {
-			cfg.APIKey = os.Getenv("OPENAI_API_KEY")
-		}
-	}
 	return cfg, nil
+}
+
+// ResolveProviderEnvironment fills empty provider credentials from the
+// conventional environment variables for the *final* provider.
+//
+// The harness resolves a profile and applies CLI flags after loading
+// config. Binding ANTHROPIC_* or OPENAI_* too early would carry the
+// original provider's endpoint and credential into a profile that
+// deliberately switches provider. Explicit config-file or environment
+// values are already non-empty and stay authoritative.
+func (c *Config) ResolveProviderEnvironment() {
+	if c == nil {
+		return
+	}
+	if c.BaseURL == "" {
+		c.BaseURL = llm.EnvBaseURLFor(c.Provider)
+	}
+	if c.APIKey == "" {
+		c.APIKey = llm.EnvKeyFor(c.Provider)
+	}
 }
 
 func merge(dst *Config, src Config) {

@@ -48,3 +48,32 @@ func TestContextConfigJSONAndMerge(t *testing.T) {
 		t.Fatalf("context config = %+v", got)
 	}
 }
+
+func TestProviderEnvironmentFollowsFinalProvider(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	t.Setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
+
+	cfg := &Config{Provider: "openai"}
+	cfg.ResolveProviderEnvironment()
+	if cfg.APIKey != "openai-key" || cfg.BaseURL != "https://openai.example/v1" {
+		t.Fatalf("openai environment = %q/%q", cfg.APIKey, cfg.BaseURL)
+	}
+
+	cfg = &Config{Provider: "anthropic"}
+	cfg.ResolveProviderEnvironment()
+	if cfg.APIKey != "anthropic-key" || cfg.BaseURL != "https://anthropic.example" {
+		t.Fatalf("anthropic environment = %q/%q", cfg.APIKey, cfg.BaseURL)
+	}
+
+	cfg = &Config{
+		Provider: "anthropic",
+		APIKey:   "explicit-key",
+		BaseURL:  "https://explicit.example",
+	}
+	cfg.ResolveProviderEnvironment()
+	if cfg.APIKey != "explicit-key" || cfg.BaseURL != "https://explicit.example" {
+		t.Fatalf("explicit values were replaced: %q/%q", cfg.APIKey, cfg.BaseURL)
+	}
+}

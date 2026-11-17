@@ -92,6 +92,16 @@ func TestProjectResources(t *testing.T) {
 
 	workdir := t.TempDir()
 	writeExecutable(t, filepath.Join(workdir, ".harness", "extensions", "demo"))
+	pluginDir := filepath.Join(workdir, ".harness", "extensions", "manifest-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), []byte(`{
+	  "schema_version": 1, "name": "manifest-plugin", "version": "1",
+	  "command": ["python3", "plugin.py"]
+	}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(workdir, ".harness", "mcp.json"), []byte(`{"mcpServers":{}}`), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -102,12 +112,19 @@ func TestProjectResources(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	writeProjectSkill(t, workdir, "demo-skill")
+	if err := os.MkdirAll(filepath.Join(workdir, ".harness", "profiles"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, ".harness", "profiles", "coding.json"),
+		[]byte(`{"schema_version":1,"name":"coding"}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 
 	labels := map[string]bool{}
 	for _, r := range projectResources(workdir) {
 		labels[r.Label] = true
 	}
-	for _, want := range []string{"extensions", "MCP servers", "prompt templates", "skills"} {
+	for _, want := range []string{"extensions/plugins", "agent profiles", "MCP servers", "prompt templates", "skills"} {
 		if !labels[want] {
 			t.Errorf("resource %q was not found; got %v", want, labels)
 		}
@@ -276,11 +293,11 @@ func TestSkillsWaitForTrust(t *testing.T) {
 	writeProjectSkill(t, workdir, "demo-skill")
 
 	cfg := &config.Config{}
-	untrusted := loadSkills(cfg, workdir, false)
+	untrusted := loadSkills(cfg, workdir, false, nil, nil)
 	if got := untrusted.registry.Len(); got != 0 {
 		t.Errorf("an untrusted project loaded %d skills, want none", got)
 	}
-	trusted := loadSkills(cfg, workdir, true)
+	trusted := loadSkills(cfg, workdir, true, nil, nil)
 	if got := trusted.registry.Len(); got != 1 {
 		t.Errorf("a trusted project loaded %d skills, want 1", got)
 	}
@@ -298,10 +315,10 @@ func TestPromptsWaitForTrust(t *testing.T) {
 	}
 
 	cfg := &config.Config{}
-	if got := len(loadPrompts(cfg, workdir, false).registry.Templates()); got != 0 {
+	if got := len(loadPrompts(cfg, workdir, false, nil, nil).registry.Templates()); got != 0 {
 		t.Errorf("an untrusted project loaded %d templates, want none", got)
 	}
-	if got := len(loadPrompts(cfg, workdir, true).registry.Templates()); got != 1 {
+	if got := len(loadPrompts(cfg, workdir, true, nil, nil).registry.Templates()); got != 1 {
 		t.Errorf("a trusted project loaded %d templates, want 1", got)
 	}
 }

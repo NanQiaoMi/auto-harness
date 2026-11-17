@@ -146,6 +146,61 @@ func TestGetContextReportsBudget(t *testing.T) {
 	}
 }
 
+func TestProfileAndPluginQueriesUseInjectedProviders(t *testing.T) {
+	server, _, _ := newTestServer(t, &fakeProvider{})
+	server.Profile = func() any {
+		return ProfilePayload{
+			Enabled:     true,
+			Name:        "coding",
+			Model:       "test-model",
+			ActiveTools: []string{"read"},
+			Tools:       []string{"read"},
+		}
+	}
+	server.Plugins = func() any {
+		return PluginsPayload{Plugins: []PluginInfo{{
+			Name:     "pdf-tools",
+			Version:  "0.1.0",
+			Selected: true,
+			State:    "loaded",
+		}}}
+	}
+
+	profile := server.getProfile(&Command{ID: "p", Type: CmdGetProfile})
+	if !profile.Success {
+		t.Fatalf("get_profile: %s", profile.Error)
+	}
+	payload, ok := profile.Data.(ProfilePayload)
+	if !ok || !payload.Enabled || payload.Name != "coding" {
+		t.Fatalf("profile payload = %#v", profile.Data)
+	}
+
+	plugins := server.getPlugins(&Command{ID: "q", Type: CmdGetPlugins})
+	if !plugins.Success {
+		t.Fatalf("get_plugins: %s", plugins.Error)
+	}
+	catalog, ok := plugins.Data.(PluginsPayload)
+	if !ok || len(catalog.Plugins) != 1 || catalog.Plugins[0].Name != "pdf-tools" {
+		t.Fatalf("plugins payload = %#v", plugins.Data)
+	}
+}
+
+func TestProfileAndPluginQueriesHaveEmptyDefaults(t *testing.T) {
+	server, _, _ := newTestServer(t, &fakeProvider{})
+	profile := server.getProfile(&Command{Type: CmdGetProfile})
+	if !profile.Success {
+		t.Fatalf("get_profile: %s", profile.Error)
+	}
+	plugins := server.getPlugins(&Command{Type: CmdGetPlugins})
+	if !plugins.Success {
+		t.Fatalf("get_plugins: %s", plugins.Error)
+	}
+	payload, ok := plugins.Data.(PluginsPayload)
+	if !ok || payload.Plugins == nil {
+		t.Fatalf("plugins payload = %#v", plugins.Data)
+	}
+}
+
 func TestForkCanBeCancelled(t *testing.T) {
 	server, bus, sess := newTestServer(t, &fakeProvider{})
 	server.SessionDir = t.TempDir()
@@ -493,6 +548,11 @@ func TestSetModelSwitchesTheModel(t *testing.T) {
 	}
 
 	parsed := records(t, &out)
+	response := responseFor(t, parsed, "set_model")
+	modelInfo, _ := response["data"].(map[string]any)
+	if provider, _ := modelInfo["provider"].(string); provider == "" {
+		t.Fatalf("set_model did not report the active provider: %v", response)
+	}
 	last := responseFor(t, parsed, "get_state")
 	data, _ := last["data"].(map[string]any)
 	if data["model"] != "other-model" {

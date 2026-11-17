@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -26,25 +27,29 @@ import (
 
 const version = "0.1.5"
 
+var errExitREPL = errors.New("exit requested")
+
 func main() {
 	var (
-		modelFlag    = flag.String("model", "", "model ID (default: config or claude-sonnet-5-5)")
-		providerFlag = flag.String("provider", "", "provider: openai | anthropic (default: inferred from model)")
-		baseURLFlag  = flag.String("base-url", "", "provider base URL override")
-		systemFlag   = flag.String("system", "", "override the system prompt")
-		maxTurns     = flag.Int("max-turns", 0, "cap on agent loop iterations (default 25)")
-		maxTokens    = flag.Int("max-tokens", 0, "cap on tokens per completion (provider default)")
-		sessionFlag  = flag.String("session", "", "resume session ID")
-		listSessions = flag.Bool("list-sessions", false, "list saved sessions and exit")
-		printMode    = flag.Bool("print", false, "one-shot mode: run the given prompt and exit")
-		showVersion  = flag.Bool("version", false, "print version and exit")
-		quiet        = flag.Bool("quiet", false, "suppress tool/hook notices (model text only)")
-		showThinking = flag.Bool("show-thinking", false, "stream model thinking output to stderr")
-		tuiMode      = flag.Bool("tui", false, "use the differential-rendering TUI for the REPL")
-		rpcMode      = flag.Bool("rpc", false, "run in RPC mode: JSON commands on stdin, records on stdout")
-		modeFlag     = flag.String("mode", "", "output mode: json (one-shot event stream on stdout)")
-		noMCP        = flag.Bool("no-mcp", false, "disable MCP servers for this run")
-		listMCP      = flag.Bool("mcp-list", false, "list configured MCP servers and exit")
+		modelFlag        = flag.String("model", "", "model ID (default: config or claude-sonnet-5-5)")
+		providerFlag     = flag.String("provider", "", "provider: openai | anthropic (default: inferred from model)")
+		baseURLFlag      = flag.String("base-url", "", "provider base URL override")
+		systemFlag       = flag.String("system", "", "override the system prompt")
+		maxTurns         = flag.Int("max-turns", 0, "cap on agent loop iterations (default 25)")
+		maxTokens        = flag.Int("max-tokens", 0, "cap on tokens per completion (provider default)")
+		sessionFlag      = flag.String("session", "", "resume session ID")
+		listSessions     = flag.Bool("list-sessions", false, "list saved sessions and exit")
+		printMode        = flag.Bool("print", false, "one-shot mode: run the given prompt and exit")
+		showVersion      = flag.Bool("version", false, "print version and exit")
+		quiet            = flag.Bool("quiet", false, "suppress tool/hook notices (model text only)")
+		showThinking     = flag.Bool("show-thinking", false, "stream model thinking output to stderr")
+		tuiMode          = flag.Bool("tui", false, "use the differential-rendering TUI for the REPL")
+		rpcMode          = flag.Bool("rpc", false, "run in RPC mode: JSON commands on stdin, records on stdout")
+		modeFlag         = flag.String("mode", "", "output mode: json (one-shot event stream on stdout)")
+		noMCP            = flag.Bool("no-mcp", false, "disable MCP servers for this run")
+		listMCP          = flag.Bool("mcp-list", false, "list configured MCP servers and exit")
+		profileFlag      = flag.String("profile", "", "agent environment profile: name or JSON path")
+		listProfilesFlag = flag.Bool("list-profiles", false, "list available agent profiles and exit")
 	)
 	flag.Parse()
 
@@ -69,6 +74,20 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	if *listProfilesFlag {
+		if err := listProfiles(workdir()); err != nil {
+			fatal(err)
+		}
+		return
+	}
+	profileSetup, err := resolveProfile(profileSelector(*profileFlag), workdir(),
+		projectTrustedAtStartup(cfg, workdir()))
+	if err != nil {
+		fatal(err)
+	}
+	if profileSetup.profile() != nil {
+		profileSetup.resolved.ApplyToConfig(cfg)
+	}
 	if *modelFlag != "" {
 		cfg.Model = *modelFlag
 	}
@@ -92,6 +111,7 @@ func main() {
 	if *noMCP {
 		cfg.NoMCP = true
 	}
+	cfg.ResolveProviderEnvironment()
 
 	if *listSessions {
 		list, err := session.List(cfg.SessionDir)
@@ -221,8 +241,13 @@ func main() {
 	// trusted by definition, and they are the ones that can decide
 	// whether to trust the project.
 	extMgr := ext.NewManager(api)
+	shutdownTrusted := func() {
+		extMgr.Shutdown()
+		_ = sess.Close()
+	}
 	loader := &extensionLoader{projectRoot: workdir(), cfg: cfg}
-	if err := extMgr.LoadAll(loader.build()...); err != nil {
+	loader.configure(profileSetup.profile(), profileSetup.fromProject())
+	if err := loadExtensionSet(extMgr, loader.build()); err != nil {
 		// A broken extension must not stop the harness from starting.
 		fmt.Fprintf(os.Stderr, "[warn] %v\n", err)
 	}
@@ -232,9 +257,20 @@ func main() {
 	// extensions, MCP servers, permission rules, skills and prompt
 	// templates all wait for it.
 	trustSetup := resolveProjectTrust(cfg, workdir(), bus, interactive, trustPrompter(lines))
+	if profileSetup.fromProject() && !trustSetup.decision.Trusted {
+		failStartup(fmt.Errorf("agent profile %q belongs to a project that was not trusted for this run",
+			profileSetup.resolved.Profile.Name),
+			shutdownTrusted)
+	}
 	loader.trusted = trustSetup.decision.Trusted
-	if err := extMgr.LoadAll(loader.buildProject()...); err != nil {
+	if err := loadExtensionSet(extMgr, loader.buildProject()); err != nil {
 		fmt.Fprintf(os.Stderr, "[warn] %v\n", err)
+	}
+	if err := loader.missingPluginError(); err != nil {
+		failStartup(err, shutdownTrusted)
+	}
+	if err := loader.selectedPluginError(extMgr); err != nil {
+		failStartup(err, shutdownTrusted)
 	}
 
 	// --- permissions and sandbox ----------------------------------
@@ -247,7 +283,7 @@ func main() {
 	}
 	for _, t := range []*tools.Tool{bashTool, tools.NewReadTool(), tools.NewWriteTool(), tools.NewEditTool()} {
 		if err := registry.Register(t); err != nil {
-			fatal(err)
+			failStartup(err, shutdownTrusted)
 		}
 	}
 
@@ -272,8 +308,22 @@ func main() {
 	// --- MCP servers ---------------------------------------------
 	// The servers' tools are registered like any other tool, so the
 	// model can call them without knowing about MCP.
-	mcpSetup := loadMCPServers(ctx, cfg, workdir(), registry, trustSetup.decision.Trusted)
+	activeProfile := profileSetup.profile()
+	var mcpSelection []string
+	var childEnv map[string]string
+	if activeProfile != nil {
+		mcpSelection = activeProfile.MCPServers
+		childEnv = activeProfile.Env
+	}
+	mcpSetup := loadMCPServers(ctx, cfg, workdir(), registry, trustSetup.decision.Trusted,
+		mcpSelection, childEnv)
 	defer mcpSetup.manager.Close()
+	shutdownRuntime := func() {
+		mcpSetup.manager.Close()
+		extMgr.Shutdown()
+		telemetrySetup.Close()
+		_ = sess.Close()
+	}
 	for name, err := range mcpSetup.errors {
 		fmt.Fprintf(os.Stderr, "[warn] mcp %s: %v\n", name, err)
 	}
@@ -281,10 +331,20 @@ func main() {
 	// -mcp-list connects to every server, prints the state and exits.
 	if *listMCP {
 		mcpSetup.listCommand()
-		if len(mcpSetup.errors) > 0 {
-			os.Exit(1)
+		if len(mcpSetup.errors) > 0 || len(mcpSetup.missing) > 0 {
+			exitStatus(1, shutdownRuntime)
 		}
 		return
+	}
+	if len(mcpSetup.missing) > 0 {
+		failStartup(fmt.Errorf("agent profile selected MCP servers that are not configured: %s",
+			strings.Join(mcpSetup.missing, ", ")),
+			shutdownRuntime)
+	}
+	if failed := mcpSetup.selectedFailures(); len(failed) > 0 {
+		failStartup(fmt.Errorf("agent profile selected MCP servers that failed to connect: %s",
+			strings.Join(failed, ", ")),
+			shutdownRuntime)
 	}
 
 	// --- prompt templates, project context and skills ---------------
@@ -292,8 +352,26 @@ func main() {
 	// context files are the project's instructions; the skills are the
 	// instructions the model loads when a task matches. All three are
 	// optional and all three are data, not code.
-	promptSetup := loadPrompts(cfg, workdir(), trustSetup.decision.Trusted)
-	skillSetup := loadSkills(cfg, workdir(), trustSetup.decision.Trusted)
+	promptDirs, promptNames := profilePrompts(activeProfile)
+	promptSetup := loadPrompts(cfg, workdir(), trustSetup.decision.Trusted, promptDirs, promptNames)
+	skillDirs, skillNames := profileSkills(activeProfile)
+	skillSetup := loadSkills(cfg, workdir(), trustSetup.decision.Trusted, skillDirs, skillNames)
+	var missingContent []string
+	for _, name := range skillSetup.missing {
+		missingContent = append(missingContent, "skill:"+name)
+	}
+	for _, name := range promptSetup.missing {
+		missingContent = append(missingContent, "prompt:"+name)
+	}
+	if len(missingContent) > 0 {
+		failStartup(fmt.Errorf("agent profile selections were not found: %s", strings.Join(missingContent, ", ")),
+			shutdownRuntime)
+	}
+	if activeProfile != nil && activeProfile.Tools != nil {
+		if err := registry.SetActiveToolsExact(activeProfile.Tools); err != nil {
+			failStartup(fmt.Errorf("agent profile tools: %w", err), shutdownRuntime)
+		}
+	}
 
 	contextOpts := contextmgr.Options{}
 	configuredWindow := 0
@@ -423,21 +501,23 @@ func main() {
 	if jsonOutput {
 		prompt := strings.Join(flag.Args(), " ")
 		if strings.TrimSpace(prompt) == "" {
-			fatal(fmt.Errorf("--mode json requires a prompt argument"))
+			failStartup(fmt.Errorf("--mode json requires a prompt argument"), shutdownRuntime)
 		}
 		// A skill command is expanded here, the way the print mode
 		// does it: the REPL dispatches it through the registry.
 		if expanded, ok := skillSetup.expand(prompt); ok {
 			prompt = expanded
 		}
-		runJSONMode(ctx, ag, sess, bus, prompt, workdir())
+		if code := runJSONMode(ctx, ag, sess, bus, prompt, workdir()); code != 0 {
+			exitStatus(code, shutdownRuntime)
+		}
 		return
 	}
 
 	if *printMode {
 		prompt := strings.Join(flag.Args(), " ")
 		if strings.TrimSpace(prompt) == "" {
-			fatal(fmt.Errorf("-print requires a prompt argument"))
+			failStartup(fmt.Errorf("-print requires a prompt argument"), shutdownRuntime)
 		}
 		// A skill command in one-shot mode is expanded here: the REPL
 		// dispatches it through the command registry instead.
@@ -446,7 +526,7 @@ func main() {
 		}
 		res, err := ag.Run(ctx, prompt)
 		if err != nil {
-			fatal(err)
+			failStartup(err, shutdownRuntime)
 		}
 		if res.Final != "" && !strings.HasSuffix(res.Final, "\n") {
 			fmt.Println()
@@ -458,11 +538,14 @@ func main() {
 	// nothing else, so the model's text and the tool notices must not
 	// go there. The RPC server writes the records itself.
 	if *rpcMode {
-		runRPCMode(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, *quiet)
+		if err := runRPCMode(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, profileSetup, *quiet); err != nil {
+			fmt.Fprintf(os.Stderr, "harness: %v\n", err)
+			exitStatus(1, shutdownRuntime)
+		}
 		return
 	}
 
-	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, lines, *quiet, *tuiMode)
+	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, profileSetup, lines, *quiet, *tuiMode)
 }
 
 // workdir returns the current working directory, used to locate the
@@ -483,8 +566,8 @@ func sessionReason(resumed string) string {
 }
 
 // runREPL is the interactive loop.
-func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, lines perm.LineReader, quiet bool, tuiMode bool) {
-	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, &quiet)
+func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, lines perm.LineReader, quiet bool, tuiMode bool) {
+	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, &quiet)
 
 	// The prompt templates are slash commands like any other, so they
 	// live on the same registry. They are installed once here; the TUI
@@ -539,7 +622,9 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			handleCommand(ctx, commands, line)
+			if err := handleCommand(ctx, commands, line); errors.Is(err, errExitREPL) {
+				return
+			}
 			continue
 		}
 		if err := ctx.Err(); err != nil {
@@ -565,7 +650,7 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 }
 
 // handleCommand dispatches a slash line to the command registry.
-func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line string) {
+func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line string) error {
 	name, args := line, ""
 	if i := strings.IndexAny(line, " \t"); i > 0 {
 		name, args = line[:i], strings.TrimSpace(line[i+1:])
@@ -575,16 +660,20 @@ func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line stri
 	c, ok := commands.Get(name)
 	if !ok {
 		fmt.Printf("unknown command /%s — try /help\n", name)
-		return
+		return nil
 	}
 	if err := c.Handler(ctx, args); err != nil {
+		if errors.Is(err, errExitREPL) {
+			return errExitREPL
+		}
 		fmt.Fprintf(os.Stderr, "/%s: %v\n", name, err)
 	}
+	return nil
 }
 
 // registerBuiltinCommands wires the REPL's own slash commands through
 // the same registry extensions use.
-func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, quiet *bool) {
+func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, profileSetup *profileSetup, skillSetup *skillSetup, promptSetup *promptSetup, quiet *bool) {
 	registerTreeCommands(commands, &treeSession{sess: sess, ag: ag, dir: cfg.SessionDir, bus: bus})
 	commands.Register("trust", &ext.Command{
 		Description: "show or set the project trust decision",
@@ -620,6 +709,25 @@ func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, ses
 			for _, t := range ag.Tools.GetAllTools() {
 				fmt.Printf("%-10s %s\n", t.Name, t.Description)
 			}
+			return nil
+		},
+	})
+	commands.Register("profile", &ext.Command{
+		Description: "show the active agent environment profile and its assembly",
+		Handler: func(ctx context.Context, args string) error {
+			provider := ""
+			if ag.Provider() != nil {
+				provider = ag.Provider().Name()
+			}
+			profileSetup.report(cfg, ag.Tools, loader, mcpSetup, skillSetup, promptSetup,
+				ag.Config().Model, provider)
+			return nil
+		},
+	})
+	commands.Register("plugins", &ext.Command{
+		Description: "list discovered plugins, versions and load state",
+		Handler: func(ctx context.Context, args string) error {
+			loader.report(extMgr)
 			return nil
 		},
 	})
@@ -741,7 +849,14 @@ func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, ses
 				loader.cfg.ExtensionDirs = append([]string{args}, loader.cfg.ExtensionDirs...)
 			}
 			before := len(extMgr.LoadedNames())
-			if err := extMgr.Reload(loader.build()...); err != nil {
+			extensions := loader.build()
+			if err := loader.missingPluginError(); err != nil {
+				return err
+			}
+			if err := extMgr.Reload(extensions...); err != nil {
+				return err
+			}
+			if err := loader.selectedPluginError(extMgr); err != nil {
 				return err
 			}
 			after := extMgr.LoadedNames()
@@ -857,8 +972,7 @@ func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, ses
 	commands.Register("exit", &ext.Command{
 		Description: "quit the REPL",
 		Handler: func(ctx context.Context, args string) error {
-			os.Exit(0)
-			return nil
+			return errExitREPL
 		},
 	})
 }
@@ -874,4 +988,27 @@ func compactArgs(args []byte) string {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "harness:", err)
 	os.Exit(1)
+}
+
+// failStartup releases resources that would normally be closed by
+// deferred calls. os.Exit skips those defers, so every startup failure
+// after a resource has started must name its cleanup explicitly.
+func failStartup(err error, cleanups ...func()) {
+	for _, cleanup := range cleanups {
+		if cleanup != nil {
+			cleanup()
+		}
+	}
+	fatal(err)
+}
+
+// exitStatus is the non-error counterpart used by inspection commands
+// that need a non-zero exit code after printing a report.
+func exitStatus(status int, cleanups ...func()) {
+	for _, cleanup := range cleanups {
+		if cleanup != nil {
+			cleanup()
+		}
+	}
+	os.Exit(status)
 }

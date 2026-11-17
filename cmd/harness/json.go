@@ -22,13 +22,14 @@ import (
 //
 // The exit code reports whether the run succeeded, so a script can
 // check it without parsing the stream.
-func runJSONMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, prompt, cwd string) {
+func runJSONMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, prompt, cwd string) int {
 	writer := jsonout.NewWriter(os.Stdout)
 
 	// The header goes first, before the run starts: a consumer that
 	// sees an event must already know which session it belongs to.
 	if err := writer.WriteHeader(sess, cwd); err != nil {
-		fatal(err)
+		fmt.Fprintf(os.Stderr, "harness: %v\n", err)
+		return 1
 	}
 
 	unsubscribe := writer.Install(bus)
@@ -39,18 +40,20 @@ func runJSONMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bu
 		// The failure is reported on stderr: the stream is for the
 		// run, and a run that died is not a run that settled.
 		fmt.Fprintf(os.Stderr, "harness: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// The settled record closes the stream. A consumer that reads
 	// until it knows the run is over stops here.
 	aborted := ctx.Err() != nil
 	if err := writer.WriteSettled(aborted); err != nil {
-		fatal(err)
+		fmt.Fprintf(os.Stderr, "harness: %v\n", err)
+		return 1
 	}
 
 	// A run that ended badly is a failure, and the exit code says so.
 	if res.Cancelled {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

@@ -25,10 +25,10 @@ import (
 // The command registry is filled with the builtins, the prompt
 // templates and the skills, so a client can ask what the harness
 // knows and invoke any of it.
-func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, quiet bool) {
+func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, quiet bool) error {
 	// The builtins go on the registry so get_commands reports them and
 	// a client can invoke them.
-	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, &quiet)
+	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, &quiet)
 	if promptSetup != nil {
 		promptSetup.install(commands, ag)
 	}
@@ -38,6 +38,19 @@ func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus
 
 	server := rpc.NewServer(ag, sess, commands, os.Stdout)
 	server.SessionDir = cfg.SessionDir
+	server.Profile = func() any {
+		provider := ""
+		if ag.Provider() != nil {
+			provider = ag.Provider().Name()
+		}
+		payload := profileSetup.rpcPayload(cfg, ag.Tools, loader, ag.Config().Model, provider)
+		payload.MaxTurns = ag.Config().MaxTurns
+		payload.MaxTokens = ag.Config().MaxTokens
+		return payload
+	}
+	server.Plugins = func() any {
+		return pluginsPayload(loader, extMgr)
+	}
 	server.Models = func() []rpc.ModelInfo {
 		models := llmReg.Models()
 		out := make([]rpc.ModelInfo, 0, len(models))
@@ -94,7 +107,7 @@ func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus
 	defer unsubscribe()
 
 	if err := server.Serve(ctx, os.Stdin); err != nil {
-		fmt.Fprintf(os.Stderr, "harness: rpc: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("rpc: %w", err)
 	}
+	return nil
 }

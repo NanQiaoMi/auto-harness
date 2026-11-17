@@ -373,6 +373,9 @@ func TestResolverSwitchesProviderWithModel(t *testing.T) {
 
 	// Switching the model must route to the other provider.
 	ag.SetModel("model-b")
+	if got := ag.Provider(); got != second {
+		t.Fatalf("Provider() = %p after model switch, want second provider %p", got, second)
+	}
 	if _, err := ag.Run(context.Background(), "hi again"); err != nil {
 		t.Fatal(err)
 	}
@@ -390,6 +393,10 @@ func TestResolverErrorIsReported(t *testing.T) {
 	ag.SetResolver(func(modelID string) (llm.Provider, error) {
 		return nil, errors.New("no provider for model")
 	})
+	ag.SetModel("unroutable")
+	if ag.Provider() != nil {
+		t.Fatal("a failed model switch kept a stale provider")
+	}
 	if _, err := ag.Run(context.Background(), "hi"); err == nil {
 		t.Fatal("want error from resolver")
 	}

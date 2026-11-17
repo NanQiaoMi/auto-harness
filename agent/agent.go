@@ -124,11 +124,31 @@ func (a *Agent) Config() Config {
 	return a.cfg
 }
 
-// SetModel switches the model for subsequent runs.
+// SetModel switches the model for subsequent runs. When a resolver is
+// installed it also refreshes the provider immediately, so status APIs
+// report the same route the next run will use.
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.cfg.Model = model
+	resolver := a.cfg.Resolver
+	a.mu.Unlock()
+	if resolver == nil {
+		return
+	}
+	provider, err := resolver(model)
+	if err != nil {
+		a.mu.Lock()
+		if a.cfg.Model == model {
+			a.cfg.Provider = nil
+		}
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Lock()
+	if a.cfg.Model == model {
+		a.cfg.Provider = provider
+	}
+	a.mu.Unlock()
 }
 
 // SetThinking turns extended thinking on or off for subsequent runs.

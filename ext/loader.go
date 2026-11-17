@@ -150,6 +150,23 @@ func (m *Manager) LoadedNames() []string {
 	return names
 }
 
+// ProcessExtensionLoaded reports whether this exact process extension
+// reached Setup success and is still in the live set. Names are not
+// enough: a plugin may share a name with a built-in extension.
+func (m *Manager) ProcessExtensionLoaded(target *ProcessExtension) bool {
+	if m == nil || target == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, loaded := range m.loaded {
+		if candidate, ok := loaded.ext.(*ProcessExtension); ok && candidate == target {
+			return true
+		}
+	}
+	return false
+}
+
 // Reload unloads every extension and loads the given set again.
 //
 // The sequence mirrors pi's reload semantics:
