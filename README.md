@@ -54,6 +54,11 @@ session/              会话持久化（JSONL 会话树，可 resume/list/fork�
   session.go           会话文件读写、v1 → v2 迁移
   tree.go              会话树：entry / 分支 / 上下文构建
   fork.go              分叉与克隆（fork / clone / 分支摘要）
+contextmgr/           上下文预算与自动压缩：估算 / 摘要 / 工件化 / 硬裁剪
+  estimator.go         可替换的 token 估算器（默认保守启发式）
+  summarizer.go        用当前模型生成“上下文胶囊”
+  artifact.go          超大工具输出的内容寻址存储
+  contextmgr.go        预算、分段摘要、递归合并与安全兜底
 mcp/                  Model Context Protocol 客户端
   protocol.go          JSON-RPC 2.0 消息类型与工具命名规则
   transport.go         传输层：stdio 子进程 / streamable HTTP
@@ -96,6 +101,7 @@ config/               配置：默认值 < ~/.harness/config.json < 环境变量
 | `pi-ai`                     | `llm`                        | 多 Provider 统一 API |
 | `pi-agent-core`             | `agent`                      | agent 循环、工具调用、状态 |
 | `pi-durable`                | `session`                    | 会话持久化 |
+| （pi 上下文压缩）            | `contextmgr`                 | 请求级预算、自动摘要、工件化 |
 | Extension API (`pi.on` 等)  | `ext`                        | hooks、注册工具/命令 |
 | `pi-tui`                    | `tui`                        | 差分渲染终端 UI |
 | `pi-telemetry`              | `telemetry` + `telemetryext` | 厂商中立遥测契约 + 采集扩展 |
@@ -257,7 +263,7 @@ export OPENAI_API_KEY=oc_sk-...
 ./bin/harness -session 20261111-153000.123456789   # 恢复会话
 ```
 
-REPL 内置命令：`/help` `/tools` `/model <id>` `/models` `/sessions` `/compact` `/quiet` `/extensions` `/reload` `/tree` `/fork` `/clone` `/mcp` `/telemetry` `/prompts` `/skills` `/exit`。
+REPL 内置命令：`/help` `/tools` `/model <id>` `/models` `/sessions` `/context` `/compact` `/quiet` `/extensions` `/reload` `/tree` `/fork` `/clone` `/mcp` `/telemetry` `/prompts` `/skills` `/exit`。
 
 `.harness/prompts/` 里的模板和 skill 也注册成斜杠命令，和上面这些并列出现在 `/help` 里。
 
@@ -328,6 +334,53 @@ use /tree <index> to switch to a branch
 `compaction` / `branch_summary` / `session_info`，外加一个 `leaf_pointer` 记录当前所在
 分支的位置（重载会话时能回到你正在走的那条分支）。旧的 v1 线性格式在加载时自动迁移。
 
+### 上下文治理与自动压缩
+
+上下文治理是运行时内核的一部分，不依赖扩展。每次请求 Provider 之前，`contextmgr`
+都会重新估算一次完整请求（系统提示词 + 工具 schema + 消息 + 工具调用参数）：
+
+```
+可用窗口 = 模型上下文窗口 - 本次最大输出 - tokenizer 安全余量
+压缩阈值 = 可用窗口 × 75%
+```
+
+低于阈值时请求原样发出；超过阈值时按以下顺序处理：
+
+1. **摘要旧消息**：旧消息按“消息单元”分块，每块交给当前模型生成上下文胶囊，再递归
+   合并。摘要必须保留用户目标、约束、决策、文件路径、命令与结果、错误、当前状态和
+   下一步。
+2. **保留近期单元**：默认至少保留最近 8 个消息单元，并受 `keep_recent_tokens`
+   约束；最新一条用户消息永远保留。
+3. **不拆工具调用**：assistant 的 tool calls 和其后的 tool results 是一个不可分割
+   单元，压缩不会留下悬空的工具结果。
+4. **大输出工件化**：超过阈值的工具输出写入会话 artifact 目录，prompt 只留下绝对
+   路径和预览；模型需要细节时可以再用 `read` 读回原文件。
+5. **确定性硬裁剪**：摘要器不可用或仍超预算时，从旧到新丢弃完整单元，最后才截断
+   单条消息，并返回 warning。硬裁剪不会伪造摘要。
+
+自动压缩成功后，摘要写进当前会话分支的 `compaction` entry。重载会话时得到“摘要 +
+保留消息”，不会把已压缩的原文重新塞回上下文；原始 entry 仍保留在 JSONL 文件里。
+如果 `context` 事件 hook 改写了本次请求，压缩只影响这一次请求，不写回会话，避免把
+扩展注入的临时内容持久化。`/model` 切换后，窗口和输出预留会按新模型的目录元数据
+重新计算；显式配置的 `context.window` 和 `max_tokens` 优先。
+
+`/context` 显示当前窗口、prompt 预算、估算占用、压缩阈值、artifact 目录和本进程最近
+一次自动压缩；RPC 客户端用 `get_context` 读取同一份数据。诊断接口刻意不返回摘要
+正文：它只报告“还剩多少空间”，不复制对话内容。
+
+**隐私边界**：artifact 和会话文件都可能包含原始工具输出（例如构建日志、文件内容）。
+默认 artifact 目录是 `<session_dir>/artifacts/<session-id>/`，目录权限 `0700`、文件
+权限 `0600`。它们和会话 JSONL 一样属于本地运行数据，不应提交到仓库或上传到不受信
+位置；定期清理由使用者负责。摘要和 artifact 都是数据，不会执行任何内容。
+
+**已知边界**：默认估算器是保守启发式（ASCII 约 4 字符/token，非 ASCII 约 1
+rune/token，再乘 1.10），不是各厂商的精确 tokenizer；需要精确计费时可以实现并注入
+自己的 `contextmgr.Estimator`。当前消息模型只有文本，没有图片/音频 token 估算。系统
+提示词和工具 schema 本身超过预算时无法被摘要，只能告警并尽可能裁剪消息。
+
+接口、预算公式、失败路径和测试矩阵见
+[docs/context-governance.md](docs/context-governance.md)。
+
 
 ### 配置
 
@@ -340,6 +393,18 @@ use /tree <index> to switch to a branch
   "model": "claude-sonnet-5-5",
   "base_url": "",                   // 自定义网关
   "max_tokens": 8192,
+  "context": {                      // 请求级上下文治理（全部可省略）
+    "window": 0,                    // 0 = 使用模型目录
+    "reserve_tokens": 512,          // tokenizer 差异的安全余量
+    "compact_at": 0.75,             // 达到 prompt 预算的多少比例开始压缩
+    "keep_recent_tokens": 0,        // 0 = 自动取预算的约 1/3
+    "keep_recent_messages": 8,      // 至少保留的近期消息单元
+    "summary_max_tokens": 2048,     // 单次摘要完成的上限
+    "summary_chunk_tokens": 16000,  // 单次摘要输入的块大小
+    "artifact_threshold": 8000,     // 工具输出超过多少字节转为 artifact
+    "artifact_preview": 1500,       // prompt 中保留的预览字节数
+    "artifact_dir": ""              // 空 = <session_dir>/artifacts/<session-id>
+  },
   "max_turns": 25,
   "system_prompt": "",              // 覆盖内置系统提示词
   "session_dir": "",                // 默认 ~/.harness/sessions
@@ -774,6 +839,7 @@ REPL 是给人用的。要把 harness 嵌进 IDE、脚本（任何语言）或�
 | `compact` | — | 压缩历史 |
 | `bash` | `command` | 跑一条 shell 命令（走同一个 bash 工具，沙箱和权限照样生效） |
 | `get_session_stats` | — | token 用量统计 |
+| `get_context` | — | 上下文窗口、prompt 预算、当前估算与最近一次自动压缩 |
 | `get_entries` / `get_tree` | — | 会话树的 entry |
 | `get_last_assistant_text` | — | 最后一条助手消息 |
 | `set_session_name` | `name` | 给会话命名 |
@@ -1210,7 +1276,7 @@ export OPENCODE_API_KEY=<你的 key>
 go test -tags e2e -timeout 600s -v ./e2e/
 ```
 
-覆盖：文本补全、bash 工具调用闭环、文件工具读写改往返、会话持久化与恢复、上下文压缩后信息保真、推理流透传且不污染转录、工具失败后的恢复、上下文超时中止、进程扩展工具、进程扩展否决工具调用（`event.consult` 反向通道：否决、答不上来拦下、没声明就不问）、进程扩展改写 prompt（`input` 反向通道：改写后的话真的到了模型那里）、MCP 工具、MCP resources、会话分叉与分支、权限拦截与放行、遥测落盘、OTLP 投递、Prometheus remote write 投递、工具渲染器接管呈现、`!` 快捷（含 `!!` 不进上下文）、文件变更队列串行化、Prompt 模板参数替换、项目上下文文件（AGENTS.md / SYSTEM.md）、Skills（渐进披露、模型自己读 SKILL.md、`/skill:name` 显式调用、参数传递、`disable-model-invocation` 隐藏、skill 不能自己执行命令）、RPC 模式（子进程协议：prompt 出答案、状态与历史、bash 命令与退出码、未知命令不毁会话、skill 走 RPC 也生效、关掉 stdin 后仍等运行结束）、JSON 输出模式（会话头在前、事件流完整、增量拼出答案、工具调用与结果在流上、非法模式值报错）。
+覆盖：文本补全、bash 工具调用闭环、文件工具读写改往返、会话持久化与恢复、请求级上下文预算与自动摘要（保留最新用户意图、tool call/result 不悬空、摘要分块合并、失败回退、会话重载一致）、上下文压缩后信息保真、推理流透传且不污染转录、工具失败后的恢复、上下文超时中止、进程扩展工具、进程扩展否决工具调用（`event.consult` 反向通道：否决、答不上来拦下、没声明就不问）、进程扩展改写 prompt（`input` 反向通道：改写后的话真的到了模型那里）、MCP 工具、MCP resources、会话分叉与分支、权限拦截与放行、遥测落盘、OTLP 投递、Prometheus remote write 投递、工具渲染器接管呈现、`!` 快捷（含 `!!` 不进上下文）、文件变更队列串行化、Prompt 模板参数替换、项目上下文文件（AGENTS.md / SYSTEM.md）、Skills（渐进披露、模型自己读 SKILL.md、`/skill:name` 显式调用、参数传递、`disable-model-invocation` 隐藏、skill 不能自己执行命令）、RPC 模式（子进程协议：prompt 出答案、状态与历史、bash 命令与退出码、未知命令不毁会话、skill 走 RPC 也生效、关掉 stdin 后仍等运行结束）、JSON 输出模式（会话头在前、事件流完整、增量拼出答案、工具调用与结果在流上、非法模式值报错）。
 
 未设置 key 时这些测试自动跳过（`t.Skip`），所以 CI 上安全。
 
@@ -1243,7 +1309,7 @@ go test -tags e2e -timeout 600s -v ./e2e/
 - **扩展动态加载与热重载**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)、[ext/scope.go](ext/scope.go)）：进程扩展协议（stdio 上的 JSON-RPC，扩展可用任何语言写）、manifest 握手、工具桥接、事件转发、扩展发现（`~/.harness/extensions`、项目目录、`config.json` 的 `extension_dirs`）；`/reload` 按 pi 语义重载（`session_shutdown` → 撤销注册 → 重新 `Setup` → `session_start`），注册项由 harness 自动记录并撤销，扩展只需实现 `ext.Teardown` 释放子进程等资源
 - **扩展的反向通道（`event.consult`）**（[ext/protocol.go](ext/protocol.go)、[ext/process.go](ext/process.go)）：扩展原来只能往 harness 推事件，没法否决 harness 要做的事——它能提供工具，却拦不住一次调用。补一条 host→extension 的请求通道：harness 在动手之前问一句「这件事允许吗」，扩展答 `{"block":true,"reason":"..."}` 就否决，问的是内核真正要做决定的七件事（`tool_call` / `user_bash` / `input` / `session_before_compact` 和三个会话操作 `session_before_switch` / `session_before_fork` / `session_before_tree`），其中 `input` 除了否决还能用 `{"text":"..."}` 改写 prompt，会话操作用 `{"cancel":true}` 否决（问在任何副作用之前，取消后会话原样不动）。失败策略沿用 pi 的 **fail-closed**（"gate handlers should fail closed when their safety decision cannot be made"）——答不上来就拦下，坏掉的策略扩展不能变成一扇开着的门；`input` 是唯一的例外，改写算不出来就保持原样（否则坏扩展会吃掉每条消息）；比 pi 多两层保障：**等待有上限**（pi 的进程内 handler 卡住会挂住 harness，这里 5 秒放手）和**没声明就不问**（manifest 里写 `"consults": [...]` 才被问到，没声明的扩展它的沉默不算拒绝）。另外**已被否决的调用不再去问用户**（权限层看到 `e.Block` 就跳过）。进程内扩展走同一个事件总线用 `e.Block`，子进程扩展多走一次 JSON-RPC，两边语义一致
 - **TUI 差分渲染**（[tui/](tui/)）：帧差分只重写变化的行、CSI 2026 同步输出防闪烁、ANSI 感知的显示宽度（含 CJK 宽字符）、Component 体系（Text/Container/VStack/HStack/Transcript/Editor）、主屏与备用屏两种渲染器。`-tui` 启用；模型输出流式更新单行，编辑器行不抖动
-- **上下文压缩**：内置 LLM 摘要压缩器（`agent.NewSummarizer`），REPL `/compact` 直接可用；扩展仍可通过 `session_before_compact` 钩子接管（钩子优先）
+- **上下文治理与自动压缩**（[contextmgr/](contextmgr/)）：请求级预算不靠扩展，内核在每次 Provider 调用前估算“系统提示词 + 工具 schema + 消息 + 工具参数”；达到 prompt 预算的 75% 时自动分块摘要旧消息并递归合并，保留最新用户意图和最近消息单元，assistant tool calls 与 tool results 永不拆散；超大工具输出按内容 SHA-256 落到会话 artifact（`0700` 目录 / `0600` 文件），prompt 只留绝对路径和预览，模型可再用 `read` 读回。摘要写入当前分支的 `compaction` entry，重载会话得到同一份“摘要 + 保留消息”；`context` hook 改写请求时只压缩本次请求、不污染持久化。模型切换后按新模型窗口重算，显式 `context.window` / `max_tokens` 优先；`/context` 与 RPC `get_context` 暴露预算、阈值、artifact 路径和最近压缩统计。没有摘要器或摘要失败时退回确定性硬裁剪并告警，不伪造摘要。REPL `/compact` 仍可手动触发，`session_before_compact` 钩子仍可接管（钩子优先）
 - **推理透传**：OpenAI 兼容流的 `reasoning_content`、Anthropic 流的 `thinking` 块都会作为 thinking 增量流向 UI（`-show-thinking` 显示），且不会污染转录内容。**同一个 chunk 同时带 reasoning 和正文时，两个都要出来**——早期实现遇到 reasoning 就直接 return，正文被整段吞掉，于是模型的回答缺了开头几个字（`HARNESS_SKILL_HIDDEN` 变成 `KILL_HIDDEN`）；现在多出来的事件进队列，下一次 `Recv` 取出来
 - **网关兼容**：Anthropic provider 同时发送 `x-api-key` 与 `Authorization: Bearer`（OpenCode Go 等网关只认后者）
 - **模型注册表与多 provider 路由**：`llm.Registry` 把「模型 → 协议 → 端点」解耦，`/model` 切换模型时自动换到对应 provider（跨协议、跨网关），`/models` 列出可用模型

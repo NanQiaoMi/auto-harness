@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/NanQiaoMi/auto-harness/agent"
+	"github.com/NanQiaoMi/auto-harness/contextmgr"
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/session"
@@ -112,6 +113,36 @@ func TestNewSessionCanBeCancelled(t *testing.T) {
 	}
 	if server.Session.Meta.ID != id {
 		t.Error("the session was replaced despite the veto")
+	}
+}
+
+func TestGetContextReportsBudget(t *testing.T) {
+	server, _, _ := newTestServer(t, &fakeProvider{})
+
+	response := server.getContext(&Command{Type: CmdGetContext})
+	if !response.Success {
+		t.Fatalf("disabled context query failed: %s", response.Error)
+	}
+	payload, ok := response.Data.(ContextPayload)
+	if !ok || payload.Enabled {
+		t.Fatalf("payload = %#v, want a disabled context manager", response.Data)
+	}
+
+	server.Agent.SetContextManager(contextmgr.NewManager(contextmgr.Options{
+		ContextWindow:   64000,
+		MaxOutputTokens: 4096,
+		ReserveTokens:   256,
+	}, nil, nil, nil))
+	response = server.getContext(&Command{Type: CmdGetContext})
+	payload, ok = response.Data.(ContextPayload)
+	if !response.Success || !ok || !payload.Enabled || payload.Status == nil {
+		t.Fatalf("context response = %#v", response)
+	}
+	if payload.Status.ContextWindow != 64000 {
+		t.Fatalf("context window = %d", payload.Status.ContextWindow)
+	}
+	if payload.Status.PromptBudget != 64000-4096-256 {
+		t.Fatalf("prompt budget = %d", payload.Status.PromptBudget)
 	}
 }
 

@@ -185,6 +185,8 @@ func (s *Server) dispatch(ctx context.Context, command *Command) *Response {
 		return s.bash(ctx, command)
 	case CmdGetSessionStats:
 		return s.getSessionStats(command)
+	case CmdGetContext:
+		return s.getContext(command)
 	case CmdGetEntries:
 		return s.getEntries(command)
 	case CmdGetTree:
@@ -416,6 +418,19 @@ func (s *Server) getSessionStats(command *Command) *Response {
 	stats.Messages = len(s.Agent.History())
 	s.mu.Unlock()
 	return Success(command.ID, CmdGetSessionStats, stats)
+}
+
+// getContext reports the context budget without exposing transcript or
+// summary content.
+func (s *Server) getContext(command *Command) *Response {
+	status, ok := s.Agent.ContextStatus()
+	if !ok {
+		return Success(command.ID, CmdGetContext, ContextPayload{Enabled: false})
+	}
+	return Success(command.ID, CmdGetContext, ContextPayload{
+		Enabled: true,
+		Status:  &status,
+	})
 }
 
 // getEntries returns the session tree's entries.

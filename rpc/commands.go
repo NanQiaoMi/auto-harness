@@ -3,6 +3,8 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/NanQiaoMi/auto-harness/contextmgr"
 )
 
 // The command types the RPC mode understands.
@@ -32,6 +34,8 @@ const (
 	CmdBash = "bash"
 	// CmdGetSessionStats reports the session's token accounting.
 	CmdGetSessionStats = "get_session_stats"
+	// CmdGetContext reports the context budget and last compaction.
+	CmdGetContext = "get_context"
 	// CmdGetEntries returns the session tree's entries.
 	CmdGetEntries = "get_entries"
 	// CmdGetTree returns the session tree.
@@ -163,6 +167,13 @@ type StatsPayload struct {
 	Turns       int `json:"turns"`
 	InputTokens int `json:"inputTokens"`
 	OutputToken int `json:"outputTokens"`
+}
+
+// ContextPayload reports the active context policy. Enabled is false
+// when no context manager is installed.
+type ContextPayload struct {
+	Enabled bool               `json:"enabled"`
+	Status  *contextmgr.Status `json:"status,omitempty"`
 }
 
 // The entries the get_entries command reports.
