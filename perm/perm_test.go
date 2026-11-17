@@ -289,6 +289,9 @@ func TestBuiltinRulesAreConservative(t *testing.T) {
 		{Call{Tool: "write", Path: "/repo/.git/config"}, DecisionDeny},
 		{Call{Tool: "write", Path: "/repo/main.go"}, DecisionAsk},
 		{Call{Tool: "bash", Args: map[string]any{"command": "ls"}}, DecisionAsk},
+		{Call{Tool: "git", Args: map[string]any{"args": []any{"status"}}}, DecisionAsk},
+		{Call{Tool: "checkpoint", Args: map[string]any{"action": "list"}}, DecisionAllow},
+		{Call{Tool: "checkpoint", Args: map[string]any{"action": "restore"}}, DecisionAsk},
 	}
 	for _, c := range cases {
 		got, _ := set.Evaluate(c.call)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/NanQiaoMi/auto-harness/contextmgr"
+	"github.com/NanQiaoMi/auto-harness/gitkit"
 )
 
 // The command types the RPC mode understands.
@@ -54,6 +55,12 @@ const (
 	CmdFork = "fork"
 	// CmdClone copies the current branch into a new session.
 	CmdClone = "clone"
+	// CmdGetCheckpoints lists Git-backed workspace rollback points.
+	CmdGetCheckpoints = "get_checkpoints"
+	// CmdCreateCheckpoint creates a manual workspace snapshot.
+	CmdCreateCheckpoint = "create_checkpoint"
+	// CmdRewindCheckpoint restores a workspace snapshot.
+	CmdRewindCheckpoint = "rewind_checkpoint"
 )
 
 // PromptCommand sends a message to the agent.
@@ -106,6 +113,21 @@ type ForkCommand struct {
 	ID      string `json:"id,omitempty"`
 	Type    string `json:"type"`
 	EntryID string `json:"entryId"`
+}
+
+// CreateCheckpointCommand creates a manual checkpoint.
+type CreateCheckpointCommand struct {
+	ID    string `json:"id,omitempty"`
+	Type  string `json:"type"`
+	Label string `json:"label,omitempty"`
+}
+
+// RewindCheckpointCommand restores one checkpoint.
+type RewindCheckpointCommand struct {
+	ID         string `json:"id,omitempty"`
+	Type       string `json:"type"`
+	Checkpoint string `json:"checkpoint,omitempty"`
+	ResetHead  *bool  `json:"resetHead,omitempty"`
 }
 
 // The state the get_state command reports.
@@ -298,6 +320,18 @@ type ForkPayload struct {
 type NewSessionPayload struct {
 	SessionID   string `json:"sessionId,omitempty"`
 	SessionFile string `json:"sessionFile,omitempty"`
+}
+
+// CheckpointsPayload reports the workspace rollback points, newest
+// first.
+type CheckpointsPayload struct {
+	Checkpoints []gitkit.Checkpoint `json:"checkpoints"`
+}
+
+// CheckpointPayload reports one created checkpoint.
+type CheckpointPayload struct {
+	Checkpoint gitkit.Checkpoint `json:"checkpoint"`
+	Created    bool              `json:"created"`
 }
 
 // decodeArgs decodes a command's arguments.

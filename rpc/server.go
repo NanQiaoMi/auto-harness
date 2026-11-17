@@ -10,6 +10,7 @@ import (
 
 	"github.com/NanQiaoMi/auto-harness/agent"
 	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/gitkit"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/session"
 )
@@ -45,6 +46,12 @@ type Server struct {
 	Profile func() any
 	// Plugins returns the discovered plugin catalog.
 	Plugins func() any
+	// Checkpoints lists workspace rollback points.
+	Checkpoints func(ctx context.Context) ([]gitkit.Checkpoint, error)
+	// CreateCheckpoint creates a manual workspace snapshot.
+	CreateCheckpoint func(ctx context.Context, label string) (gitkit.Checkpoint, bool, error)
+	// RewindCheckpoint restores a workspace snapshot.
+	RewindCheckpoint func(ctx context.Context, selector string, resetHead bool) (gitkit.RewindResult, error)
 
 	// out is the stream the records go to.
 	out io.Writer
@@ -209,9 +216,80 @@ func (s *Server) dispatch(ctx context.Context, command *Command) *Response {
 		return s.fork(command, "fork")
 	case CmdClone:
 		return s.fork(&Command{ID: command.ID, Type: CmdFork, raw: command.raw}, "clone")
+	case CmdGetCheckpoints:
+		return s.getCheckpoints(ctx, command)
+	case CmdCreateCheckpoint:
+		return s.createCheckpoint(ctx, command)
+	case CmdRewindCheckpoint:
+		return s.rewindCheckpoint(ctx, command)
 	default:
 		return Failure(command.ID, command.Type, fmt.Sprintf("Unknown command: %s", command.Type))
 	}
+}
+
+func (s *Server) getCheckpoints(ctx context.Context, command *Command) *Response {
+	if s.Checkpoints == nil {
+		return Failure(command.ID, CmdGetCheckpoints, "workspace checkpoints are not configured")
+	}
+	items, err := s.Checkpoints(ctx)
+	if err != nil {
+		return Failure(command.ID, CmdGetCheckpoints, err.Error())
+	}
+	if items == nil {
+		items = []gitkit.Checkpoint{}
+	}
+	return Success(command.ID, CmdGetCheckpoints, CheckpointsPayload{Checkpoints: items})
+}
+
+func (s *Server) createCheckpoint(ctx context.Context, command *Command) *Response {
+	if s.CreateCheckpoint == nil {
+		return Failure(command.ID, CmdCreateCheckpoint, "workspace checkpoints are not configured")
+	}
+	var args CreateCheckpointCommand
+	if err := decodeArgs(command.raw, &args); err != nil {
+		return Failure(command.ID, CmdCreateCheckpoint, err.Error())
+	}
+	item, created, err := s.CreateCheckpoint(ctx, args.Label)
+	if err != nil {
+		return Failure(command.ID, CmdCreateCheckpoint, err.Error())
+	}
+	return Success(command.ID, CmdCreateCheckpoint, CheckpointPayload{
+		Checkpoint: item,
+		Created:    created,
+	})
+}
+
+func (s *Server) rewindCheckpoint(ctx context.Context, command *Command) *Response {
+	if s.RewindCheckpoint == nil {
+		return Failure(command.ID, CmdRewindCheckpoint, "workspace checkpoints are not configured")
+	}
+	var args RewindCheckpointCommand
+	if err := decodeArgs(command.raw, &args); err != nil {
+		return Failure(command.ID, CmdRewindCheckpoint, err.Error())
+	}
+	selector := strings.TrimSpace(args.Checkpoint)
+	if selector != "" {
+		if s.Checkpoints == nil {
+			return Failure(command.ID, CmdRewindCheckpoint, "workspace checkpoints are not configured")
+		}
+		items, err := s.Checkpoints(ctx)
+		if err != nil {
+			return Failure(command.ID, CmdRewindCheckpoint, err.Error())
+		}
+		selector, err = gitkit.ParseCheckpointOrdinal(items, selector)
+		if err != nil {
+			return Failure(command.ID, CmdRewindCheckpoint, err.Error())
+		}
+	}
+	resetHead := true
+	if args.ResetHead != nil {
+		resetHead = *args.ResetHead
+	}
+	result, err := s.RewindCheckpoint(ctx, selector, resetHead)
+	if err != nil {
+		return Failure(command.ID, CmdRewindCheckpoint, err.Error())
+	}
+	return Success(command.ID, CmdRewindCheckpoint, result)
 }
 
 // getProfile reports the active environment without exposing profile

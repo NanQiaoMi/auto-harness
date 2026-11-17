@@ -77,6 +77,14 @@ func (p *PromptApprover) Approve(ctx context.Context, call Call, rule *Rule) (bo
 	if cmd, ok := call.Args["command"].(string); ok {
 		fmt.Fprintf(out, "    command: %s\n", cmd)
 	}
+	if gitArgs, ok := call.Args["args"]; ok {
+		if encoded, err := json.Marshal(gitArgs); err == nil {
+			fmt.Fprintf(out, "    git args: %s\n", encoded)
+		}
+	}
+	if action, ok := call.Args["action"].(string); ok {
+		fmt.Fprintf(out, "    action: %s\n", action)
+	}
 	if rule != nil && rule.Reason != "" {
 		fmt.Fprintf(out, "    reason: %s\n", rule.Reason)
 	}
