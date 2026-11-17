@@ -52,6 +52,14 @@ type Config struct {
 	Resolver func(modelID string) (llm.Provider, error)
 }
 
+// Checkpointer creates a rollback point before a mutating tool runs.
+// Implementations may treat a non-repository workspace as a no-op, but
+// an error vetoes the tool call: losing the rollback guarantee must be
+// visible rather than silent.
+type Checkpointer interface {
+	BeforeTool(ctx context.Context, toolName string, args json.RawMessage) error
+}
+
 // Result reports the outcome of one Run.
 type Result struct {
 	// Final is the last assistant text message.
@@ -80,6 +88,8 @@ type Agent struct {
 	// Context sizes and compresses every provider request. It is
 	// optional: nil keeps the old behavior.
 	Context contextmgr.Builder
+	// Checkpointer snapshots the workspace before mutating tools.
+	Checkpointer Checkpointer
 
 	history []llm.Message
 
@@ -556,11 +566,25 @@ func (a *Agent) executeTool(ctx context.Context, call *llm.ToolCall) llm.Message
 		onUpdate := func(u tools.Update) {
 			a.emit(&ext.Event{Type: ext.EventToolExecutionUpdate, ToolCall: call, Text: u.Content})
 		}
-		execResult, err := t.Execute(ctx, call.ID, call.Arguments, onUpdate)
-		if err != nil {
-			result = tools.Result{Content: fmt.Sprintf("tool %s failed: %v", call.Name, err), IsError: true}
-		} else {
-			result = execResult
+		allowed := true
+		if a.Checkpointer != nil && !t.ReadOnly {
+			if err := a.Checkpointer.BeforeTool(ctx, call.Name, call.Arguments); err != nil {
+				result = tools.Result{
+					Content: fmt.Sprintf(
+						"refusing to run mutating tool %s because the workspace checkpoint failed: %v",
+						call.Name, err),
+					IsError: true,
+				}
+				allowed = false
+			}
+		}
+		if allowed {
+			execResult, err := t.Execute(ctx, call.ID, call.Arguments, onUpdate)
+			if err != nil {
+				result = tools.Result{Content: fmt.Sprintf("tool %s failed: %v", call.Name, err), IsError: true}
+			} else {
+				result = execResult
+			}
 		}
 	}
 

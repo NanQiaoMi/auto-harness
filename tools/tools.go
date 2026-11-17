@@ -40,6 +40,10 @@ type Tool struct {
 	PromptGuidelines []string
 	// Parameters is a JSON Schema object describing the arguments.
 	Parameters map[string]any
+	// ReadOnly declares that execution cannot mutate workspace state.
+	// The agent skips rollback checkpoints for read-only tools. Unknown
+	// extension tools default to false for safety.
+	ReadOnly bool
 	// Execute runs the tool. args is the raw JSON arguments object.
 	// onUpdate may be called to stream progress; it may be nil.
 	Execute func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(Update)) (Result, error)

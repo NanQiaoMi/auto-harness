@@ -39,6 +39,7 @@ func NewReadTool() *Tool {
 	return &Tool{
 		Name:          "read",
 		Label:         "Read File",
+		ReadOnly:      true,
 		Description:   "Read a UTF-8 text file. Returns the content with line numbers. Reads up to 2000 lines by default.",
 		PromptSnippet: "read: read a text file (optional offset/limit for large files)",
 		PromptGuidelines: []string{
