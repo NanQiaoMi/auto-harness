@@ -10,7 +10,7 @@ import (
 
 const (
 	// LockSchemaVersion is the installed-plugin lockfile version.
-	LockSchemaVersion = 1
+	LockSchemaVersion = 2
 	// LockFileName is the lockfile inside the managed plugin directory.
 	LockFileName = "plugins.lock.json"
 	maxLockBytes = 4 << 20
@@ -28,6 +28,8 @@ type LockedPlugin struct {
 	Digest         string            `json:"digest"`
 	ArtifactSHA256 string            `json:"artifact_sha256"`
 	Source         string            `json:"source"`
+	Publisher      string            `json:"publisher,omitempty"`
+	SignerKeyID    string            `json:"signer_key_id,omitempty"`
 	Dependencies   map[string]string `json:"dependencies,omitempty"`
 }
 
@@ -57,6 +59,8 @@ type InstalledInfo struct {
 	Name         string
 	Version      string
 	Digest       string
+	Publisher    string
+	SignerKeyID  string
 	Dependencies map[string]string
 	Healthy      bool
 	Problem      string
@@ -169,6 +173,8 @@ func Install(root string, catalog *Catalog, name, constraint string) ([]Installe
 			Digest:         record.Digest,
 			ArtifactSHA256: item.Artifact.SHA256,
 			Source:         catalog.Source,
+			Publisher:      catalog.Publisher,
+			SignerKeyID:    catalog.SignerKeyID,
 			Dependencies:   cloneStringMap(record.Dependencies),
 		}
 	}
@@ -294,7 +300,7 @@ func ReadLock(root string) (*LockFile, error) {
 	if err := decodeStrictJSON(data, &lock); err != nil {
 		return nil, fmt.Errorf("plugin lock: %s: %w", path, err)
 	}
-	if lock.SchemaVersion != LockSchemaVersion {
+	if lock.SchemaVersion != 1 && lock.SchemaVersion != LockSchemaVersion {
 		return nil, fmt.Errorf("plugin lock: unsupported schema_version %d", lock.SchemaVersion)
 	}
 	if lock.Plugins == nil {
@@ -312,6 +318,18 @@ func ReadLock(root string) (*LockFile, error) {
 		}
 		if _, err := normalizeSHA256(item.ArtifactSHA256); err != nil {
 			return nil, fmt.Errorf("plugin lock: %s artifact digest: %w", name, err)
+		}
+		if (item.Publisher == "") != (item.SignerKeyID == "") {
+			return nil, fmt.Errorf(
+				"plugin lock: %s publisher and signer_key_id must appear together", name)
+		}
+		if item.Publisher != "" {
+			if err := validatePublisherName(item.Publisher); err != nil {
+				return nil, fmt.Errorf("plugin lock: %s: %w", name, err)
+			}
+			if err := validateKeyID(item.SignerKeyID); err != nil {
+				return nil, fmt.Errorf("plugin lock: %s signer_key_id: %w", name, err)
+			}
 		}
 		for dependency, constraintValue := range item.Dependencies {
 			if !pluginNameRE.MatchString(dependency) {
@@ -393,6 +411,8 @@ func ListInstalled(root string) ([]InstalledInfo, error) {
 			Name:         name,
 			Version:      item.Version,
 			Digest:       item.Digest,
+			Publisher:    item.Publisher,
+			SignerKeyID:  item.SignerKeyID,
 			Dependencies: cloneStringMap(item.Dependencies),
 		}
 		problem := verifyPackage(root, name, item, lock)
