@@ -2,9 +2,6 @@ package main
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/x509"
-	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,19 +32,13 @@ func TestSignRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
 	keyPath := filepath.Join(dir, "publisher.pem")
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: der,
-	}), 0o600); err != nil {
+	publicKeyPath := filepath.Join(dir, "publisher.pub")
+	if err := generatePublisherKey(keyPath, publicKeyPath); err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := plugins.ReadPublicKeyFile(publicKeyPath)
+	if err != nil {
 		t.Fatal(err)
 	}
 	outputPath := filepath.Join(dir, "signed.json")
@@ -69,5 +60,28 @@ func TestSignRegistry(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("VerifyIndexSignature: %v", err)
+	}
+}
+
+func TestGeneratePublisherKeyRefusesOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "publisher.pem")
+	publicPath := filepath.Join(dir, "publisher.pub")
+	if err := generatePublisherKey(privatePath, publicPath); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(privatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("private key permissions = %o, want 600", perm)
+	}
+	if err := generatePublisherKey(privatePath, publicPath); err == nil {
+		t.Fatal("key generation overwrote existing files")
+	}
+	if err := generatePublisherKey(filepath.Join(dir, "same.pem"),
+		filepath.Join(dir, "same.pem")); err == nil {
+		t.Fatal("key generation accepted the same private and public path")
 	}
 }

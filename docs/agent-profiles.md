@@ -358,13 +358,16 @@ plugin metadata, artifact URLs, artifact SHA-256 values and dependency
 constraints are all authenticated as one document. `key_id` is the
 lowercase SHA-256 fingerprint of the raw Ed25519 public key.
 
-Create and trust a publisher key with OpenSSL and the included signer.
-The signer accepts a PKCS#8 PEM Ed25519 private key; the trust command
-accepts a PKIX PEM public key or its raw base64 form.
+Create and trust a publisher key with the included signer. Key
+generation refuses to overwrite existing files and writes the private
+key with mode `0600`. The signer accepts a PKCS#8 PEM Ed25519 private
+key; the trust command accepts a PKIX PEM public key or its raw base64
+form.
 
 ```bash
-openssl genpkey -algorithm ED25519 -out publisher.pem
-openssl pkey -in publisher.pem -pubout -out publisher.pub
+go run ./cmd/plugin-registry-sign -generate-key \
+  -private-key-out publisher.pem \
+  -public-key-out publisher.pub
 go run ./cmd/plugin-registry-sign \
   -index ./registry.json \
   -publisher acme \
@@ -375,6 +378,9 @@ go run ./cmd/plugin-registry-sign \
 ./bin/harness -plugin-trust-list
 ./bin/harness -plugin-untrust acme
 ```
+
+OpenSSL 3 can generate the same key formats, but some LibreSSL versions
+shipped with macOS do not support Ed25519.
 
 The trust root defaults to `~/.harness/plugin_publishers.json`;
 `HARNESS_PLUGIN_TRUST_FILE` overrides the path. It stores public keys

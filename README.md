@@ -700,8 +700,9 @@ SHA-256 都在签名范围内，所以信任一个 publisher 不会只保护一�
 指定：
 
 ```bash
-openssl genpkey -algorithm ED25519 -out publisher.pem
-openssl pkey -in publisher.pem -pubout -out publisher.pub
+go run ./cmd/plugin-registry-sign -generate-key \
+  -private-key-out publisher.pem \
+  -public-key-out publisher.pub
 
 go run ./cmd/plugin-registry-sign \
   -index ./registry.json \
@@ -720,6 +721,10 @@ go run ./cmd/plugin-registry-sign \
 ./bin/harness -plugin-verify
 ./bin/harness -plugin-remove pdf-tools
 ```
+
+密钥生成不会覆盖已有文件，私钥权限为 `0600`。如果改用 OpenSSL，需要 OpenSSL 3；
+macOS 自带的部分 LibreSSL 版本不支持 Ed25519。也可以把 `publisher.pub` 的 PEM
+内容作为公钥输入，签名工具和信任命令都只接受 Ed25519。
 
 `-plugin-verify` 会重算每个目录树的摘要、检查锁定的依赖版本，并报告 lockfile 之外的
 手工托管插件目录。卸载会拒绝删除仍被其他托管插件依赖的包。归档拒绝绝对路径、`..`、
