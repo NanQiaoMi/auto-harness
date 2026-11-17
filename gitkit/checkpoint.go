@@ -51,6 +51,23 @@ type Checkpoint struct {
 	Current      bool           `json:"current"`
 	Differs      bool           `json:"differs"`
 	ShortHead    string         `json:"shortHead,omitempty"`
+	// SessionID and SessionAnchor bind an automatic checkpoint to the
+	// conversation turn that produced it. SessionTurn is the user
+	// message that started the turn; it disambiguates branches that
+	// share the same anchor.
+	SessionID     string `json:"sessionId,omitempty"`
+	SessionAnchor string `json:"sessionAnchor,omitempty"`
+	SessionTurn   string `json:"sessionTurn,omitempty"`
+}
+
+// SessionBinding identifies the conversation position captured with a
+// checkpoint. Anchor is empty when the turn began before the first
+// conversational entry. Turn is set for automatic checkpoints created
+// by a model turn and empty for manual, safety and user-shell snapshots.
+type SessionBinding struct {
+	ID     string
+	Anchor string
+	Turn   string
 }
 
 // RewindResult reports the applied checkpoint and the safety snapshot
@@ -70,6 +87,10 @@ type RewindResult struct {
 type Manager struct {
 	Start string
 	Limit int
+	// BindSession is called while creating a checkpoint. Auto
+	// checkpoints normally bind to the state before the current user
+	// turn; safety and manual checkpoints bind to the current leaf.
+	BindSession func(kind CheckpointKind, tool string) SessionBinding
 
 	mu sync.Mutex
 }
@@ -264,6 +285,10 @@ func (m *Manager) createLocked(ctx context.Context, label string, kind Checkpoin
 	if err != nil {
 		return Checkpoint{}, false, err
 	}
+	var binding SessionBinding
+	if m.BindSession != nil {
+		binding = m.BindSession(kind, tool)
+	}
 	if strings.TrimSpace(label) == "" {
 		label = string(kind) + " checkpoint"
 	}
@@ -275,7 +300,10 @@ func (m *Manager) createLocked(ctx context.Context, label string, kind Checkpoin
 		return Checkpoint{}, false, err
 	}
 	if kind != CheckpointSafety && hasNewest {
-		if sameSnapshotState(newest, state) {
+		if sameSnapshotState(newest, state) &&
+			newest.SessionID == binding.ID &&
+			newest.SessionAnchor == binding.Anchor &&
+			newest.SessionTurn == binding.Turn {
 			return newest, false, nil
 		}
 	}
@@ -286,19 +314,22 @@ func (m *Manager) createLocked(ctx context.Context, label string, kind Checkpoin
 		return Checkpoint{}, false, err
 	}
 	meta := Checkpoint{
-		ID:           id,
-		Tree:         state.Tree,
-		IndexTree:    state.IndexTree,
-		IndexBlob:    state.IndexBlob,
-		RefsBlob:     state.RefsBlob,
-		StashLogBlob: state.StashLogBlob,
-		Head:         state.Head,
-		Branch:       state.Branch,
-		Detached:     state.Detached,
-		Created:      now,
-		Kind:         kind,
-		Label:        label,
-		Tool:         tool,
+		ID:            id,
+		Tree:          state.Tree,
+		IndexTree:     state.IndexTree,
+		IndexBlob:     state.IndexBlob,
+		RefsBlob:      state.RefsBlob,
+		StashLogBlob:  state.StashLogBlob,
+		Head:          state.Head,
+		Branch:        state.Branch,
+		Detached:      state.Detached,
+		Created:       now,
+		Kind:          kind,
+		Label:         label,
+		Tool:          tool,
+		SessionID:     binding.ID,
+		SessionAnchor: binding.Anchor,
+		SessionTurn:   binding.Turn,
 	}
 	message, err := checkpointMessage(meta)
 	if err != nil {
