@@ -283,6 +283,81 @@ func TestSessionPersistsBranches(t *testing.T) {
 	}
 }
 
+func TestSessionSetLeafEmptyClearsAndReloads(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir, "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(
+		llm.Message{Role: llm.RoleUser, Content: "one"},
+		llm.Message{Role: llm.RoleAssistant, Content: "two"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLeaf(""); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.CurrentLeaf(); got != "" {
+		t.Fatalf("leaf = %q, want empty", got)
+	}
+	if len(s.Messages) != 0 {
+		t.Fatalf("active messages = %d, want 0", len(s.Messages))
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(dir, s.Meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loaded.Close()
+	if got := loaded.CurrentLeaf(); got != "" {
+		t.Fatalf("reloaded leaf = %q, want empty", got)
+	}
+	if len(loaded.Messages) != 0 {
+		t.Fatalf("reloaded active messages = %d, want 0", len(loaded.Messages))
+	}
+}
+
+func TestSessionCheckpointAnchorIsBeforeLatestUserTurn(t *testing.T) {
+	s, err := New(t.TempDir(), "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Append(llm.Message{Role: llm.RoleUser, Content: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(llm.Message{Role: llm.RoleAssistant, Content: "answer"}); err != nil {
+		t.Fatal(err)
+	}
+	anchor := s.CurrentLeaf()
+	if anchor == "" {
+		t.Fatal("setup did not produce a leaf")
+	}
+	firstTurn := s.CurrentTurn()
+	if firstTurn == "" {
+		t.Fatal("setup did not produce a turn")
+	}
+	if err := s.Append(
+		llm.Message{Role: llm.RoleUser, Content: "second"},
+		llm.Message{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCall{{ID: "c1", Name: "write"}}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.CheckpointAnchor(); got != anchor {
+		t.Fatalf("checkpoint anchor = %q, want %q", got, anchor)
+	}
+	if got := s.CurrentTurn(); got == "" || got == firstTurn {
+		t.Fatalf("current turn = %q, want a new entry after %q", got, firstTurn)
+	}
+	if !s.CanSetLeaf("") || !s.CanSetLeaf(anchor) || s.CanSetLeaf("missing") {
+		t.Fatal("CanSetLeaf validation is incorrect")
+	}
+}
+
 // TestLegacySessionMigrates verifies a v1 linear session loads and is
 // readable as a tree.
 func TestLegacySessionMigrates(t *testing.T) {

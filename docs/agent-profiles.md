@@ -494,8 +494,13 @@ not yet provide key revocation/expiry, registry anti-rollback or
 freshness policy, automatic updates, rollback channels, a registry UI,
 per-profile sandbox policy, multi-tenant quotas or task
 checkpoint/resume. Workspace checkpoints restore Git state (worktree,
-index, HEAD/refs and stash), not agent memory, running tasks or
-conversation state. Those need separate security and lifecycle work.
+index, HEAD/refs and stash). The turn-level `/undo` (RPC
+`restoreContext:true`) additionally restores the workspace to the
+oldest snapshot of the current turn and moves the session branch to its
+pre-turn anchor. A read-only turn moves the branch only and reports
+that files were unchanged. It does not snapshot model memory, other
+sessions, running tasks or external effects. Those need separate
+security and lifecycle work.
 The current contract remains inspectable composition with the existing
 trust and permission model, plus bounded process recovery when a plugin
 explicitly opts in and Git-backed workspace rollback inside a worktree.

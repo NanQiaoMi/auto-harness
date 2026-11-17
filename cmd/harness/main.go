@@ -315,6 +315,9 @@ func main() {
 
 	checkpointMgr := gitkit.NewCheckpointManager(workdir())
 	checkpointMgr.Limit = *checkpointLimit
+	checkpointMgr.BindSession = func(kind gitkit.CheckpointKind, tool string) gitkit.SessionBinding {
+		return checkpointSessionBinding(sess, kind, tool)
+	}
 
 	// The bash tool runs inside the sandbox when one is configured.
 	bashTool := tools.NewBashTool()
@@ -745,7 +748,7 @@ func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line stri
 // the same registry extensions use.
 func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, profileSetup *profileSetup, skillSetup *skillSetup, promptSetup *promptSetup, checkpointMgr *gitkit.Manager, gitOut io.Writer, quiet *bool) {
 	registerTreeCommands(commands, &treeSession{sess: sess, ag: ag, dir: cfg.SessionDir, bus: bus})
-	registerGitCommands(commands, checkpointMgr, gitOut)
+	registerGitCommands(commands, checkpointMgr, ag, sess, gitOut)
 	commands.Register("trust", &ext.Command{
 		Description: "show or set the project trust decision",
 		Handler: func(ctx context.Context, args string) error {

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/NanQiaoMi/auto-harness/gitkit"
+	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/session"
 )
 
 func TestCheckpointCommandsUseConfiguredOutput(t *testing.T) {
@@ -54,6 +56,100 @@ func TestCheckpointCommandsUseConfiguredOutput(t *testing.T) {
 	}
 	if string(data) != "base\n" {
 		t.Fatalf("restored content = %q", data)
+	}
+}
+
+func TestUndoTurnRestoresWorkspaceAndSession(t *testing.T) {
+	repo := newGitCommandRepo(t)
+	tracked := filepath.Join(repo, "a.txt")
+	if err := os.WriteFile(tracked, []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repo, "add", "a.txt")
+	runGitCommand(t, repo, "commit", "-m", "base")
+
+	sess, err := session.New(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	if err := sess.Append(
+		llm.Message{Role: llm.RoleUser, Content: "first turn"},
+		llm.Message{Role: llm.RoleAssistant, Content: "first answer"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	firstLeaf := sess.CurrentLeaf()
+
+	manager := gitkit.NewCheckpointManager(repo)
+	manager.BindSession = func(kind gitkit.CheckpointKind, tool string) gitkit.SessionBinding {
+		anchor := sess.CurrentLeaf()
+		turn := ""
+		if kind == gitkit.CheckpointAuto {
+			anchor, turn = sess.TurnBinding()
+		}
+		return gitkit.SessionBinding{ID: sess.Meta.ID, Anchor: anchor, Turn: turn}
+	}
+
+	if err := sess.Append(llm.Message{Role: llm.RoleUser, Content: "second turn"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := manager.Create(context.Background(), "before bash",
+		gitkit.CheckpointAuto, "bash"); err != nil || !created {
+		t.Fatalf("create auto checkpoint: created=%v err=%v", created, err)
+	}
+	if err := sess.Append(llm.Message{Role: llm.RoleAssistant, Content: "second answer"}); err != nil {
+		t.Fatal(err)
+	}
+	secondLeaf := sess.CurrentLeaf()
+	if err := os.WriteFile(tracked, []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := undoTurnWithConversation(context.Background(), manager, nil, sess, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ConversationRestored || result.SessionAnchor != firstLeaf {
+		t.Fatalf("undo result = %+v", result)
+	}
+	data, err := os.ReadFile(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "base\n" {
+		t.Fatalf("restored content = %q", data)
+	}
+	if leaf := sess.CurrentLeaf(); leaf != firstLeaf {
+		t.Fatalf("leaf after undo = %q, want %q", leaf, firstLeaf)
+	}
+	if len(sess.Messages) != 2 || sess.Messages[0].Content != "first turn" {
+		t.Fatalf("messages after undo = %+v", sess.Messages)
+	}
+
+	// The safety checkpoint captures the undone turn, so restoring it
+	// both redoes the workspace change and returns the conversation to
+	// the leaf it had before the undo.
+	redo, err := undoTurnWithConversation(context.Background(), manager, nil, sess, result.Safety.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redo.SessionAnchor != secondLeaf {
+		t.Fatalf("redo anchor = %q, want %q", redo.SessionAnchor, secondLeaf)
+	}
+	data, err = os.ReadFile(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "changed\n" {
+		t.Fatalf("redone content = %q", data)
+	}
+	if leaf := sess.CurrentLeaf(); leaf != secondLeaf {
+		t.Fatalf("leaf after redo = %q, want %q", leaf, secondLeaf)
+	}
+	if len(sess.Messages) != 4 || sess.Messages[3].Content != "second answer" {
+		t.Fatalf("messages after redo = %+v", sess.Messages)
 	}
 }
 

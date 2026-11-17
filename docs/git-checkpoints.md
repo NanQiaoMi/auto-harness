@@ -4,9 +4,12 @@
 契约，而不是模型自觉执行的一条提示词。它只在 **Git worktree** 内工作；
 非 Git 目录仍然可以使用全部普通工具，但没有自动检查点。
 
-它不是任务级 checkpoint/resume：它不保存 agent 对话、进程内存、正在运行
-的请求或未完成的工具调用。它也不是整机备份：工作区之外的文件、被
-`.gitignore` 排除的内容和 `.git` 里的配置有自己的边界，见文末。
+它不是任务级 checkpoint/resume：它不保存进程内存、正在运行的请求、
+未完成的工具调用或外部副作用。`/undo`（以及 RPC 的
+`restoreContext:true`）会在恢复工作区的同时移动会话分支 leaf，因此
+被撤销回合不会继续留在模型上下文里；但检查点本身仍只描述 Git 状态。
+它也不是整机备份：工作区之外的文件、被 `.gitignore` 排除的内容和
+`.git` 里的配置有自己的边界，见文末。
 
 ## 两个入口
 
@@ -56,7 +59,12 @@ REPL：
 /rewind
 /rewind 20261117T101500.000000000Z-ab12cd34
 /undo
+/undo 2
+/undo 20261117T101500.000000000Z-ab12cd34
 ```
+
+`/rewind` 只恢复 Git 状态；`/undo` 还会把当前会话移回该检查点绑定的
+回合边界。二者都接受完整 ID、唯一前缀或列表序号。
 
 RPC：
 
@@ -64,7 +72,14 @@ RPC：
 {"id":"1","type":"get_checkpoints"}
 {"id":"2","type":"create_checkpoint","label":"before migration"}
 {"id":"3","type":"rewind_checkpoint","checkpoint":"2","resetHead":true}
+{"id":"4","type":"rewind_checkpoint","checkpoint":"2","restoreContext":true}
 ```
+
+`restoreContext:true` 调用整回合撤销，等价于 REPL 的 `/undo`；它要求
+`resetHead` 不为 `false`，未设置时按默认 `true` 处理。响应携带
+`conversationRestored`、`workspaceRestored`、`sessionAnchor` 和 safety
+检查点。运行中的 prompt 结束（`agent_settled`）之前，恢复命令会被拒绝；
+`new_session` 也不能在运行中切换会话。
 
 ## 自动检查点
 
@@ -93,6 +108,11 @@ RPC：
 `-no-git-checkpoints` 只关闭自动快照和用户 shell 的自动快照；手动
 `/checkpoints`、`checkpoint` 工具和 RPC 命令仍然可用。`-checkpoint-limit`
 默认 100，必须至少为 1；它限制保留的检查点数量，最旧的 ref 会被删除。
+
+`/undo` 依赖当前回合**最早**的检查点。如果上限很小，或单个回合的工具
+调用数超过上限，最早快照可能已经被清理；这时 `/undo` 只能回到仍保留的
+最早状态，无法保证回到第一次修改之前。需要长回合完整回退时，提高
+`-checkpoint-limit`。
 
 ## 捕获什么
 
@@ -130,12 +150,42 @@ RPC：
 快照：每次恢复都有一个自己的 ID。于是 `/rewind` 本身可以再被
 `/rewind <safety-id>` 撤回。
 
+### 整回合撤销 `/undo`
+
+`/undo` 在 `/rewind` 的 Git 恢复之上多做一步：把会话 leaf 移回检查点
+绑定的 `sessionAnchor`。自动检查点同时记录 `sessionTurn`（本轮用户消息
+的 entry ID）和 `sessionAnchor`（它之前的 leaf），所以撤销的是整个回合
+（用户消息、assistant 回复、tool call 和 tool result），而不是只删掉
+最后一条消息；不会有 assistant tool call 失去对应结果。
+
+- `manual` / `safety` 检查点绑定创建时的当前 leaf。
+- `auto` 检查点绑定当前回合的用户消息 ID 和该回合之前的位置。
+- 一个回合可能有多次工具调用。`/undo` 选择**该回合最早**的检查点，因为
+  它才是第一次修改之前的状态；选择最新检查点只会撤销最后一次工具。
+- 用户 `!cmd` / RPC `bash` 的快照不绑定模型回合：它们属于当前工作区位置，
+  由 `/rewind` 撤销，不会混进下一次 `/undo` 的回合组。
+- 只有 `sessionId` 与当前会话一致的检查点能整回合撤销；别的会话的
+  检查点会报错并提示使用 `/rewind`。
+- 旧版本创建的检查点可能没有 `sessionId` / `sessionAnchor`，此时只能
+  `/rewind`。
+- 工作区恢复成功但会话移动失败时，会用 safety 检查点回滚工作区，并
+  尽力把 leaf 放回原处；两层都失败会在错误里明确报告。
+- 如果当前回合没有任何工作区检查点（只读回合，或用户刚输入、还没有
+  工具调用），`/undo` 仍会把会话移回回合之前，并明确报告
+  `workspace unchanged`。它不会假装恢复过文件。
+
+每次 `/undo` 都会先建 safety 检查点，它绑定撤销前的 leaf。因此
+`/undo <safety-id>` 会同时恢复被撤销的工作区改动和会话分支，形成
+redo。`/undo` 不带 ID 时，只在**属于当前会话且属于当前回合**的检查点里
+选择最早的一项。
+
 ### 空选择器不会向前跳
 
-`/rewind`、`/undo` 或 `{"action":"restore"}` 不带 ID 时，会先找到与当前
-工作区完全匹配的检查点，再选择它**更旧**的下一个不同状态。连续执行不会
-因为时间线里的 safety 快照而跳回较新的状态；要 redo，请显式选择
-`/checkpoints` 里的某个 ID。
+`/rewind` 或 `{"action":"restore"}` 不带 ID 时，会先找到与当前工作区
+完全匹配的检查点，再选择它**更旧**的下一个不同状态。连续执行不会因为
+时间线里的 safety 快照而跳回较新的状态；要 redo，请显式选择
+`/checkpoints` 里的某个 ID。`/undo` 的空选择器不按工作区状态走：它按
+当前回合 ID 选择该回合最早的检查点，因此同一回合多次修改也能一次退回。
 
 ### `reset_head=false`
 
@@ -190,8 +240,9 @@ message 保存 JSON 元数据；tree/index/refs/stash 内容作为 Git 对象保
   promisor remote 的行为未单独验证，快照只保证普通 Git 对象和当前
   checkout 能表达的内容；
 - worktree 元数据、`git worktree add` 新建的目录、bare repository；
-- 工作区之外的文件、网络请求、数据库、进程状态、agent 对话和未完成
-  的任务；
+- 工作区之外的文件、网络请求、数据库、进程状态和未完成的任务。`/undo`
+  只移动本会话的分支 leaf，不恢复模型内部记忆、别的会话、外部系统的
+  状态，也不撤销已经发生的网络请求或数据库写入；
 - 文件 mtime、ACL、xattr、稀疏 checkout 之外的内容；
 - 并发多个 harness 进程同时写同一仓库的跨进程事务（单进程内由 Manager
   mutex 串行化）。
@@ -212,6 +263,14 @@ checkpoint/resume，而不是把这个机制说成万能快照。
   保留、文件/目录替换；
 - 另一个 worktree 正在使用的分支保护；
 - 连续空选择器回退不向前跳；
+- 检查点绑定 session 与回合锚点，工作区相同但锚点不同不去重；
+- `/undo` 同时恢复工作区和会话，包含清空第一回合；
+- 同一回合多次工具调用时回到第一次修改之前，而不是只撤销最后一次；
+- 相同锚点下的不同用户回合通过 `sessionTurn` 区分；
+- 没有工作区检查点的只读回合只移动会话并返回明确警告；
+- 会话移动失败时回滚工作区，以及跨 session 检查点拒绝撤销；
+- RPC `restoreContext` 的序号解析、互斥参数、未配置错误和运行中拒绝；
+- `new_session` 在运行中拒绝，并在成功后更新当前会话绑定；
 - 只读/修改型 Git 子命令分类和 `git` 工具的 stdin；
 - 检查点失败时拒绝执行修改型工具。
 

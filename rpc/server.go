@@ -52,6 +52,9 @@ type Server struct {
 	CreateCheckpoint func(ctx context.Context, label string) (gitkit.Checkpoint, bool, error)
 	// RewindCheckpoint restores a workspace snapshot.
 	RewindCheckpoint func(ctx context.Context, selector string, resetHead bool) (gitkit.RewindResult, error)
+	// UndoTurn restores a workspace snapshot and the conversation turn
+	// that produced it.
+	UndoTurn func(ctx context.Context, selector string) (gitkit.TurnRewindResult, error)
 
 	// out is the stream the records go to.
 	out io.Writer
@@ -263,6 +266,9 @@ func (s *Server) rewindCheckpoint(ctx context.Context, command *Command) *Respon
 	if s.RewindCheckpoint == nil {
 		return Failure(command.ID, CmdRewindCheckpoint, "workspace checkpoints are not configured")
 	}
+	if s.isStreaming() {
+		return Failure(command.ID, CmdRewindCheckpoint, "cannot restore a checkpoint while a run is in progress")
+	}
 	var args RewindCheckpointCommand
 	if err := decodeArgs(command.raw, &args); err != nil {
 		return Failure(command.ID, CmdRewindCheckpoint, err.Error())
@@ -284,6 +290,19 @@ func (s *Server) rewindCheckpoint(ctx context.Context, command *Command) *Respon
 	resetHead := true
 	if args.ResetHead != nil {
 		resetHead = *args.ResetHead
+	}
+	if args.RestoreContext {
+		if !resetHead {
+			return Failure(command.ID, CmdRewindCheckpoint, "restoreContext requires resetHead=true")
+		}
+		if s.UndoTurn == nil {
+			return Failure(command.ID, CmdRewindCheckpoint, "turn undo is not configured")
+		}
+		result, err := s.UndoTurn(ctx, selector)
+		if err != nil {
+			return Failure(command.ID, CmdRewindCheckpoint, err.Error())
+		}
+		return Success(command.ID, CmdRewindCheckpoint, result)
 	}
 	result, err := s.RewindCheckpoint(ctx, selector, resetHead)
 	if err != nil {
@@ -337,16 +356,21 @@ func (s *Server) prompt(ctx context.Context, command *Command) *Response {
 	s.runs.Add(1)
 	go func() {
 		defer s.runs.Done()
-		defer func() {
+		finish := func() {
 			s.mu.Lock()
 			s.streaming = false
 			s.cancel = nil
 			s.mu.Unlock()
-		}()
+		}
+		defer finish()
 		_, err := s.Agent.Run(runCtx, args.Message)
 		if err != nil {
 			s.emit(map[string]any{"type": "error", "message": err.Error()})
 		}
+		// A client may react to agent_settled immediately. Clear the
+		// run state first so checkpoint restore is not rejected by a
+		// stale streaming flag.
+		finish()
 		s.write(Event{
 			Type: EventAgentSettled,
 			Data: map[string]any{"aborted": runCtx.Err() != nil},
@@ -385,6 +409,9 @@ func (s *Server) gate(ev *ext.Event) bool {
 
 // newSession starts a fresh session.
 func (s *Server) newSession(command *Command) *Response {
+	if s.isStreaming() {
+		return Failure(command.ID, CmdNewSession, "cannot start a new session while a run is in progress")
+	}
 	ev := &ext.Event{Type: ext.EventSessionBeforeSwitch, Reason: "new"}
 	if !s.gate(ev) {
 		reason := ev.BlockReason
@@ -393,20 +420,32 @@ func (s *Server) newSession(command *Command) *Response {
 		}
 		return Failure(command.ID, CmdNewSession, reason)
 	}
-	if s.Session != nil {
-		_ = s.Session.Close()
-	}
 	sess, err := session.New(s.SessionDir, s.Agent.Config().Model)
 	if err != nil {
 		return Failure(command.ID, CmdNewSession, err.Error())
 	}
+	s.mu.Lock()
+	old := s.Session
 	s.Session = sess
+	s.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
 	s.Agent.Session = sess
 	s.Agent.SetHistory(nil)
 	return Success(command.ID, CmdNewSession, NewSessionPayload{
 		SessionID:   sess.Meta.ID,
 		SessionFile: sess.Path,
 	})
+}
+
+// CurrentSession returns the active conversation session. Checkpoint
+// binding and turn undo use it so a session switch cannot leave them
+// pointing at a closed session.
+func (s *Server) CurrentSession() *session.Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Session
 }
 
 // getState reports the session's state.

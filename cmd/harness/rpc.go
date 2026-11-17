@@ -42,6 +42,13 @@ func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus
 	}
 
 	server := rpc.NewServer(ag, sess, commands, os.Stdout)
+	// The RPC server can replace the session (new_session), so resolve
+	// the binding at checkpoint time instead of capturing the startup
+	// session. User-shell snapshots belong to the current position, not
+	// to a model turn.
+	checkpointMgr.BindSession = func(kind gitkit.CheckpointKind, tool string) gitkit.SessionBinding {
+		return checkpointSessionBinding(server.CurrentSession(), kind, tool)
+	}
 	server.SessionDir = cfg.SessionDir
 	server.Profile = func() any {
 		provider := ""
@@ -66,6 +73,13 @@ func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus
 		}
 		server.RewindCheckpoint = func(ctx context.Context, selector string, resetHead bool) (gitkit.RewindResult, error) {
 			return checkpointMgr.Rewind(ctx, selector, resetHead)
+		}
+		server.UndoTurn = func(ctx context.Context, selector string) (gitkit.TurnRewindResult, error) {
+			current := server.CurrentSession()
+			if current == nil {
+				return gitkit.TurnRewindResult{}, fmt.Errorf("turn undo requires a session")
+			}
+			return undoTurnWithConversation(ctx, checkpointMgr, ag, current, selector)
 		}
 	}
 	server.Models = func() []rpc.ModelInfo {
