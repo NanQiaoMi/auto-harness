@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/NanQiaoMi/auto-harness/envsubst"
 	"github.com/NanQiaoMi/auto-harness/ext"
@@ -38,6 +39,17 @@ type Manifest struct {
 	Env           map[string]string `json:"env,omitempty"`
 	Capabilities  []string          `json:"capabilities,omitempty"`
 	Consults      []string          `json:"consults,omitempty"`
+	Supervisor    *SupervisorConfig `json:"supervisor,omitempty"`
+}
+
+// SupervisorConfig controls process-level recovery after a plugin
+// exits. It is process supervision, not task checkpointing: the child
+// starts from scratch and must expose the same runtime manifest.
+type SupervisorConfig struct {
+	Restart      string `json:"restart"`
+	MaxRestarts  *int   `json:"max_restarts,omitempty"`
+	BackoffMS    int    `json:"backoff_ms,omitempty"`
+	MaxBackoffMS int    `json:"max_backoff_ms,omitempty"`
 }
 
 // Candidate is one discovered plugin: either a manifest plugin or a
@@ -168,14 +180,70 @@ func ParseManifest(data []byte) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("env key %q is invalid", key)
 		}
 	}
+	if err := validateSupervisor(m.Supervisor); err != nil {
+		return Manifest{}, err
+	}
 	return m, nil
 }
 
 var (
-	pluginNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	consultRE    = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
-	envNameRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	pluginNameRE       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	consultRE          = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	envNameRE          = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	maxPluginRestarts  = 100
+	maxPluginBackoffMS = 60_000
 )
+
+func validateSupervisor(s *SupervisorConfig) error {
+	if s == nil {
+		return nil
+	}
+	switch ext.RestartMode(s.Restart) {
+	case ext.RestartNever, ext.RestartOnFailure, ext.RestartAlways:
+	default:
+		return fmt.Errorf(
+			"supervisor.restart %q must be never, on_failure, or always", s.Restart)
+	}
+	if s.MaxRestarts != nil {
+		if *s.MaxRestarts < 0 || *s.MaxRestarts > maxPluginRestarts {
+			return fmt.Errorf(
+				"supervisor.max_restarts must be between 0 and %d", maxPluginRestarts)
+		}
+	}
+	if s.BackoffMS < 0 || s.BackoffMS > maxPluginBackoffMS {
+		return fmt.Errorf(
+			"supervisor.backoff_ms must be between 0 and %d", maxPluginBackoffMS)
+	}
+	if s.MaxBackoffMS < 0 || s.MaxBackoffMS > maxPluginBackoffMS {
+		return fmt.Errorf(
+			"supervisor.max_backoff_ms must be between 0 and %d", maxPluginBackoffMS)
+	}
+	if s.BackoffMS > 0 && s.MaxBackoffMS > 0 && s.BackoffMS > s.MaxBackoffMS {
+		return fmt.Errorf(
+			"supervisor.backoff_ms must not exceed supervisor.max_backoff_ms")
+	}
+	return nil
+}
+
+func restartPolicy(s *SupervisorConfig) ext.RestartPolicy {
+	if s == nil {
+		return ext.RestartPolicy{}
+	}
+	mode := ext.RestartMode(s.Restart)
+	if mode == ext.RestartNever {
+		return ext.RestartPolicy{Mode: mode}
+	}
+	maxRestarts := 3
+	if s.MaxRestarts != nil {
+		maxRestarts = *s.MaxRestarts
+	}
+	return ext.RestartPolicy{
+		Mode:        mode,
+		MaxRestarts: maxRestarts,
+		Backoff:     time.Duration(s.BackoffMS) * time.Millisecond,
+		MaxBackoff:  time.Duration(s.MaxBackoffMS) * time.Millisecond,
+	}
+}
 
 // validateLaunch checks cwd and a path-like executable against the
 // plugin root. A bare command (python3, node) remains a PATH lookup.
@@ -283,11 +351,12 @@ func (c Candidate) Extension(inherited map[string]string) (*ext.ProcessExtension
 		return nil, fmt.Errorf("plugin %s: command is empty", c.Manifest.Name)
 	}
 	return &ext.ProcessExtension{
-		Command:      command,
-		Args:         args,
-		Dir:          cwd,
-		Env:          sortedEnv(env),
-		Capabilities: c.Manifest.Capabilities,
+		Command:       command,
+		Args:          args,
+		Dir:           cwd,
+		Env:           sortedEnv(env),
+		Capabilities:  c.Manifest.Capabilities,
+		RestartPolicy: restartPolicy(c.Manifest.Supervisor),
 	}, nil
 }
 
