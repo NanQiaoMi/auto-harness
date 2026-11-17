@@ -440,7 +440,8 @@ The order is deliberate:
 3. Build the model registry and session.
 4. Load trusted built-ins, legacy/config extensions and selected plugins.
 5. Resolve project trust, then load trusted project resources.
-6. Register built-in tools and the permission guard.
+6. Register built-in tools (`bash`, `read`, `write`, `edit`, `git`,
+   `checkpoint`) and the permission guard.
 7. Connect selected MCP servers and register their tools.
 8. Load selected skills and prompt templates.
 9. Apply the exact active-tool allowlist.
@@ -452,6 +453,13 @@ not a silent omission. A profile-selected MCP server that is missing or
 fails to connect is a startup error for the same reason. Normal
 best-effort discovery remains the default when the profile does not
 name a server list.
+
+Workspace checkpoints are a runtime safety mechanism, not part of the
+profile. Even when a profile hides the `checkpoint` or `git` tool, a
+mutating tool that remains active still gets an automatic checkpoint
+before it runs (unless the process starts with `-no-git-checkpoints`).
+The `checkpoint` tool is how the model can inspect or restore that
+history; hiding it does not turn the rollback guarantee off.
 
 ## Visibility
 
@@ -485,7 +493,9 @@ authentication, dependency resolution and tree verification. It does
 not yet provide key revocation/expiry, registry anti-rollback or
 freshness policy, automatic updates, rollback channels, a registry UI,
 per-profile sandbox policy, multi-tenant quotas or task
-checkpoint/resume. Those need separate security and lifecycle work. The
-current contract remains inspectable composition with the existing
+checkpoint/resume. Workspace checkpoints restore Git state (worktree,
+index, HEAD/refs and stash), not agent memory, running tasks or
+conversation state. Those need separate security and lifecycle work.
+The current contract remains inspectable composition with the existing
 trust and permission model, plus bounded process recovery when a plugin
-explicitly opts in.
+explicitly opts in and Git-backed workspace rollback inside a worktree.
