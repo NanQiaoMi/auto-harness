@@ -31,6 +31,7 @@ ext/                  扩展系统：事件总线 + Extension API + 加载器   
   loader.go             Manager：加载、卸载、热重载  scope.go              注册作用域：记录扩展注册了什么，重载时自动撤销
   protocol.go           进程扩展的 JSON-RPC 协议（stdio）
   process.go            进程扩展客户端：握手、工具桥接、事件转发
+  supervisor.go         进程级重启：生命周期上限、指数退避和健康状态
 plugins/              目录插件：plugin.json、registry/依赖解析、安全安装、锁文件校验、旧插件兼容
 envsubst/             严格 ${NAME} / ${NAME:-默认} 展开，未定义变量直接报错
 shellext/             `!` shell 快捷：用户直接跑命令，不经过模型
@@ -317,7 +318,7 @@ profile 不绕过信任和权限：项目 profile 只有在项目已被持久信
 项目选中的插件/MCP/Skill/Prompt。显式路径 `-profile ./x.json` 是用户自己的选择，不受此限制。
 切换 provider 时，`OPENAI_*` / `ANTHROPIC_*` 的 key 和 base URL 按最终 provider 解析，
 不会把 profile 应用前的旧 provider 凭据带过去；config 里显式写的值和 CLI 参数仍然优先。
-`/profile` 查看当前装配，`/plugins` 查看插件来源、版本和加载状态，RPC 提供
+`/profile` 查看当前装配，`/plugins` 查看插件来源、版本、加载和进程监督状态，RPC 提供
 `get_profile` / `get_plugins`。完整 schema、插件清单和能力边界见
 [docs/agent-profiles.md](docs/agent-profiles.md)。
 
@@ -653,7 +654,13 @@ chmod +x examples/extensions/demo_extension.py
   "command": ["python3", "plugin.py"],
   "cwd": "${pluginDir}",
   "env": {"PDF_CACHE_DIR": "${PROFILE_CACHE_DIR}"},
-  "capabilities": ["tools", "hooks"]
+  "capabilities": ["tools", "hooks"],
+  "supervisor": {
+    "restart": "on_failure",
+    "max_restarts": 3,
+    "backoff_ms": 250,
+    "max_backoff_ms": 30000
+  }
 }
 ```
 
@@ -663,6 +670,18 @@ consult 事件的唯一权威。`plugin.json` 负责稳定身份、启动和授�
 显式授权（`tools` / `hooks` / `events`），比如只给了 `tools` 的插件不能注册 consult
 hook，推送的事件也会被丢弃。旧的可执行文件发现方式继续兼容。profile 的 `plugins`
 按名字选择插件，未列出的插件不启动；`/plugins` 显示版本、来源和状态。
+
+`supervisor` 是可选**进程级恢复**，不是任务 checkpoint：子进程崩溃后从头启动，
+内存状态和未完成调用不会续上。`restart` 支持 `never`、`on_failure`、`always`；
+`max_restarts` 省略时默认 3，表示这个扩展实例生命周期内最多成功替换几次，不是
+“每崩一次给 3 次”；显式 0 表示崩一次就停。初始退避 `backoff_ms` 默认 250ms，
+上限 `max_backoff_ms` 默认 30s（两个时长写 0 也取默认值），指数增长。新进程必须
+重新握手，而且运行时 manifest
+必须与首次批准时完全一致——不能靠重启偷偷增加工具或减少 consult 授权。重启空窗期
+工具调用返回错误，策略 consult gate 全部 fail-closed，`input` 保持原样；达到上限、
+manifest 漂移或握手失败后不再重启。`/plugins` 和 RPC `get_plugins` 会显示
+`restartMode`、`restartCount` / `maxRestarts`、`healthy` / `restarting`、
+`lastExit` 和 `lastError`。旧可执行插件没有 `plugin.json`，仍保持不自动重启。
 
 ### 插件 registry 与托管安装（[plugins/](plugins/)、[docs/agent-profiles.md](docs/agent-profiles.md)）
 
@@ -1394,7 +1413,8 @@ go test -tags e2e -timeout 600s -v ./e2e/
 离线测试还覆盖 profile 的严格 schema、未知字段拒绝、环境变量展开、配置覆盖优先级、
 显式空工具集、插件与 MCP 白名单、Skills/Prompt 选择、旧插件兼容、`plugin.json`
 的 `cwd`/symlink 逃逸拒绝、能力授权、plugin registry 的 semver/依赖回溯、归档逃逸、
-SHA-256 与树摘要、升级/卸载事务和 lockfile 校验，以及未持久信任的项目 profile 不加载。
+SHA-256 与树摘要、升级/卸载事务和 lockfile 校验、进程重启的生命周期计数与 manifest
+不变性、重启空窗期的 fail-closed，以及未持久信任的项目 profile 不加载。
 
 未设置 key 时这些测试自动跳过（`t.Skip`），所以 CI 上安全。
 
@@ -1412,6 +1432,7 @@ SHA-256 与树摘要、升级/卸载事务和 lockfile 校验，以及未持久�
 已完成的深化项：
 
 - **插件 registry、依赖解析与托管安装**（[plugins/](plugins/)、[cmd/harness/plugins_cli.go](cmd/harness/plugins_cli.go)）：插件从“手工拷贝目录”升级为可审计分发单元。registry 文档声明版本、artifact SHA-256 和依赖约束；解析器选最高兼容版本并支持回溯，安装器先把完整依赖图下载/校验/解包到 stage，再原子替换 `~/.harness/plugins/<name>`，最后写 `plugins.lock.json`。lock 记录版本、artifact digest、完整目录树 digest、来源和依赖；`-plugin-verify` 重算目录树、检查依赖版本并找出未入锁的托管插件，`-plugin-remove` 拒绝破坏仍被依赖的包。tar 解包拒绝绝对路径、目录穿越、链接、设备、重复路径和资源超限；远程 registry 仅 HTTPS（明文 HTTP 只给 loopback 开发），本地 registry 可离线使用。SHA-256 是完整性和一致性校验，不是 publisher 签名
+- **插件进程监督与健康可见性**（[ext/supervisor.go](ext/supervisor.go)、[plugins/plugins.go](plugins/plugins.go)）：插件可在 `plugin.json` 显式启用 `never` / `on_failure` / `always` 进程恢复，`max_restarts` 按扩展实例生命周期累计成功替换次数（默认 3，最大 100），初始退避默认 250ms、指数增长到默认 30s 上限。每次重启都重新握手，运行时 manifest 必须与首次批准时完全一致，禁止靠崩溃增加工具或削掉 consult 授权；预算耗尽、manifest 漂移或握手失败后停止。重启空窗期工具调用报错，所有策略 gate fail-closed，`input` 保持原样；`/plugins` 与 `get_plugins` 暴露状态、计数、最近退出和错误。它是进程恢复而非 checkpoint：子进程从零开始，不续跑未完成任务
 - **Agent 环境 profile 与插件清单**（[agentprofile/](agentprofile/)、[plugins/](plugins/)、[docs/agent-profiles.md](docs/agent-profiles.md)）：把「不同环境需要不同 Agent」变成声明式装配，而不是在启动代码里加分支。一份 profile 同时选择模型、系统提示词、turn/token 上限、工具白名单、进程插件、MCP server、Skills、Prompt 模板和上下文压缩参数；`tools`/`plugins`/`mcp_servers`/`skills`/`prompts` 区分「省略 = 全部」和「`[]` = 全不要」，工具白名单在所有工具源注册完以后最后一次生效，引用不存在的工具直接启动失败。目录插件用 `plugin.json` 描述启动命令、固定 cwd、环境变量和能力授权，`cwd`/路径型入口在 symlink 解析后不能逃出插件目录；`capabilities` 只有 `tools`/`hooks`/`events`，未授权的工具、consult hook 和推送事件分别拒绝或丢弃，旧可执行文件插件继续兼容。profile 的 `env` 只传给插件和 stdio MCP 子进程，不写回 harness 进程环境，`/profile` 只显示键不显示值。历史信任已保存的项目可以读取 `.harness/profiles/<name>.json`，首次信任仍然先判项目；用户路径和显式 profile 路径分别受支持。可见性有 REPL `/profile`、`/plugins` 和 RPC `get_profile`、`get_plugins`
 - **JSON 输出模式**（[jsonout/](jsonout/)、[cmd/harness/json.go](cmd/harness/json.go)）：`-print` 给的是答案，`--mode json` 给的是**整次运行**——这是 harness 层最后一个缺口（pi 里剩下的两个缺口：RPC 模式与 JSON 模式，都已补上）。输出是 JSONL 事件流：**第一行是会话头**（消费者看到任何事件之前就知道是哪个会话的，事件流存成文件能靠头找回会话），**最后一行是 `agent_settled`**（这一行之前没有更多自动工作，读到它就可以停）。**事件名就是 harness 自己的事件名**，消费者不用学第二套词汇——`agent_start` / `turn_start` / `request_start` / `message_start` / `message_update` / `message_end` / `tool_execution_start` / `tool_execution_end` / `agent_end`。两个设计点：`message_update` **只带增量**不带整条消息（增量多了整条消息跟着膨胀，消息本身在 `message_start` / `message_end` 里）；**推理的增量带 `"thinking": true`**，和答案的增量分开标记，否则同一个流里分不清哪段在想哪段在答。和 RPC 模式的分工：RPC 是**被驱动**的（stdin 收命令，来来回回），JSON 模式是**一次性**的（给一句提示、跑完、退出），两者共用 JSONL 分帧但记录形状不同（RPC 是「响应 + 事件」，JSON 只有「事件」）。stdout 同样归事件流所有，退出码报告运行成不成功
 - **RPC 模式**（[rpc/](rpc/)、[cmd/harness/rpc.go](cmd/harness/rpc.go)）：harness 从「人用的 REPL」变成**长驻子进程**，被别的程序用 JSON 驱动——IDE、任何语言的脚本、自制 UI 都行，这是把 harness 嵌进别人产品里的唯一入口。协议是严格的 JSONL：stdin 收命令，stdout 收响应和事件；**stdout 归协议所有**（模型文本、工具提示、诊断全改走 stderr），一个读 stdout 的客户端永远不该看到别的东西。分帧**只按 LF 切**——记录里的字符串可以含 U+2028 / U+2029（JSON 里是普通字符），按它们切会把一条记录劈成两半；CRLF 客户端也接受。**响应和事件共用一条流**，所以客户端按 **ID 关联**而不是按顺序猜（一次运行的十几个事件会插在命令的响应之间）。`prompt` 是异步的：响应只说明「收下了」（`data.disposition` = `started`），答案走事件流，客户端要等 `agent_settled`（不是 `agent_end`——一次运行后面可能还跟着重试）；**响应必须先于运行写出**，否则一个等整轮跑完再读的客户端会在写满的管道上死锁。一条坏记录不毁会话：解析失败回一条 `command: "parse"` 的失败响应，流继续；未知命令同理。**关掉 stdin 是有序关机**：harness 等在跑的那次运行结束再退出，所以「发完 prompt 立刻关 stdin」的客户端仍然拿得到答案（这里踩过一个坑：run 的 context 原本挂在 server 的 context 上，stdin 一 EOF 就把运行取消了，于是加了 `sync.WaitGroup` 单独跟踪在跑的任务）。权限层在 RPC 模式下**不弹窗**——stdin 归协议所有，审批提示会吃掉客户端的记录；模型侧的调用走「无人可问就拒绝」，客户端自己发的 `bash` 走 `user_bash` 拦截（那是用户自己的命令，不是模型的）。这个模式还逼出了两处真实缺陷：agent 的 `history` 和 `cfg` 原本**没有任何锁**，而 RPC 会在模型还在跑的时候读历史、换模型，于是补上了 mutex 和「配置按快照读」；`isTerminal(stdin)` 在 RPC 模式下为真会让权限提示去读协议流，于是 RPC 一律视为非交互

@@ -169,7 +169,13 @@ pdf-tools/
   "env": {
     "PDF_CACHE_DIR": "${PROFILE_CACHE_DIR}"
   },
-  "capabilities": ["tools", "hooks"]
+  "capabilities": ["tools", "hooks"],
+  "supervisor": {
+    "restart": "on_failure",
+    "max_restarts": 3,
+    "backoff_ms": 250,
+    "max_backoff_ms": 30000
+  }
 }
 ```
 
@@ -191,6 +197,12 @@ Rules:
   the plugin keeps the legacy unrestricted behavior. If present, it is
   an explicit grant: the runtime rejects undeclared tools or consult
   hooks and drops undeclared pushed events.
+- `supervisor` is optional and controls process recovery. If it is
+  omitted, the plugin keeps the historical one-process lifetime.
+  `restart` must be `never`, `on_failure` or `always`;
+  `max_restarts` must be between 0 and 100;
+  `backoff_ms` and `max_backoff_ms` must be between 0 and 60000, and
+  the initial backoff cannot exceed the maximum.
 
 Available expansion names in a plugin manifest:
 
@@ -212,6 +224,56 @@ Legacy plugins remain supported. An executable directly in
 `extension_dirs` entry, or directly inside a manifest-free subdirectory
 is still launched as before. A manifest plugin is one candidate even
 when its directory contains helper executables.
+
+### Supervised process lifecycle
+
+Supervision is process-level recovery, not task checkpointing. A
+restart starts a fresh child: in-memory state, open work and unfinished
+calls are not resumed. The value is keeping a stateless tool or policy
+process available after a crash, not pretending that an interrupted
+task survived it.
+
+`restart` has three modes:
+
+- `never` keeps the historical one-process lifetime;
+- `on_failure` replaces a child that exits non-zero;
+- `always` also replaces a clean exit.
+
+If `max_restarts` is omitted it defaults to 3. The count is the number
+of successful replacements over the lifetime of this loaded extension,
+not a per-crash allowance. Explicit `0` means one crash is final. After
+the budget is exhausted, or after 100 replacements, no further child is
+started and the plugin becomes unhealthy. `/reload` creates a new
+extension instance and resets the budget.
+
+`backoff_ms` defaults to 250 and `max_backoff_ms` to 30000. A value of
+`0` for either duration selects its default. The delay doubles after
+each replacement until it reaches the maximum; nonzero values below
+10 ms are raised to 10 ms and the process API clamps the maximum at
+60 seconds.
+
+Every replacement must pass the manifest handshake. Its runtime
+manifest must be exactly equal to the manifest approved during the
+initial setup. A plugin cannot add tools, drop consult authority or
+otherwise change its declared capabilities by crashing. A changed
+manifest, repeated handshake failure or exhausted restart budget
+terminates supervision for this instance.
+
+Tool registrations stay in the host registry across a restart and
+route to the new child once it is running. While the child is down or
+inside a restart backoff:
+
+- tool calls return an error because there is no live process;
+- consult gates such as `tool_call` and `user_bash` fail closed;
+- `input` keeps its safe default, leaving the user's prompt unchanged;
+- stopping or reloading the extension cancels the pending backoff and
+  waits for the supervisor to exit.
+
+Health is visible in `/plugins` and `get_plugins`. For a loaded plugin,
+the state is `loaded`, `restarting` or `unhealthy`; the payload also reports
+`restartMode`, `restartCount`, `maxRestarts`, `healthy`, `restarting`,
+`lastExit` and `lastError`. These are point-in-time observations, so a
+successful restart can change them between two reads.
 
 Earlier discovery roots win duplicate names. That keeps the user's
 plugin ahead of a project plugin trying to replace the same name.
@@ -340,7 +402,7 @@ name a server list.
 
 ```text
 /profile    active profile, source, selections, active tools and warnings
-/plugins    discovered plugins, versions, paths, selection and load state
+/plugins    plugins, versions, paths, selection, load and supervision health
 /mcp        selected and connected MCP servers
 /skills     loaded skills and missing selections
 /prompts    loaded prompt templates
@@ -366,7 +428,8 @@ instead of half-loading the new one.
 This layer now provides registry-based installation, dependency
 resolution and tree verification. It does not yet provide registry
 signatures, publisher identity, automatic updates, a registry UI,
-automatic supervisor restart, per-profile sandbox policy, or
-multi-tenant quotas. Those need separate security and lifecycle work.
-The current contract remains inspectable composition with the existing
-trust and permission model.
+per-profile sandbox policy, multi-tenant quotas or task
+checkpoint/resume. Those need separate security and lifecycle work. The
+current contract remains inspectable composition with the existing
+trust and permission model, plus bounded process recovery when a plugin
+explicitly opts in.
