@@ -124,10 +124,11 @@ type CreateCheckpointCommand struct {
 
 // RewindCheckpointCommand restores one checkpoint.
 type RewindCheckpointCommand struct {
-	ID         string `json:"id,omitempty"`
-	Type       string `json:"type"`
-	Checkpoint string `json:"checkpoint,omitempty"`
-	ResetHead  *bool  `json:"resetHead,omitempty"`
+	ID             string `json:"id,omitempty"`
+	Type           string `json:"type"`
+	Checkpoint     string `json:"checkpoint,omitempty"`
+	ResetHead      *bool  `json:"resetHead,omitempty"`
+	RestoreContext bool   `json:"restoreContext,omitempty"`
 }
 
 // The state the get_state command reports.

@@ -116,6 +116,34 @@ func TestNewSessionCanBeCancelled(t *testing.T) {
 	}
 }
 
+func TestNewSessionSwitchesCurrentSession(t *testing.T) {
+	server, _, old := newTestServer(t, &fakeProvider{})
+	server.SessionDir = t.TempDir()
+	oldID := old.Meta.ID
+
+	resp := server.newSession(&Command{Type: CmdNewSession})
+	if !resp.Success {
+		t.Fatalf("new_session = %#v", resp)
+	}
+	current := server.CurrentSession()
+	if current == nil || current.Meta.ID == oldID {
+		t.Fatalf("current session = %#v, old = %q", current, oldID)
+	}
+	if server.Agent.Session != current {
+		t.Fatal("the agent kept the previous session")
+	}
+}
+
+func TestNewSessionRejectedWhileStreaming(t *testing.T) {
+	server, _, _ := newTestServer(t, &fakeProvider{})
+	server.SessionDir = t.TempDir()
+	server.setStreaming(true)
+	resp := server.newSession(&Command{Type: CmdNewSession})
+	if resp.Success || !strings.Contains(resp.Error, "run is in progress") {
+		t.Fatalf("streaming new_session = %#v", resp)
+	}
+}
+
 func TestGetContextReportsBudget(t *testing.T) {
 	server, _, _ := newTestServer(t, &fakeProvider{})
 
