@@ -30,7 +30,7 @@ func (r *workspaceCheckpointRunner) Run(ctx context.Context, command string) (to
 		if err != nil {
 			return tools.Result{Content: err.Error(), IsError: true, ExitCode: 1}, nil
 		}
-		if err := r.checkpointer.BeforeTool(ctx, "bash", args); err != nil {
+		if err := r.checkpointer.BeforeTool(ctx, "user_bash", args); err != nil {
 			return tools.Result{
 				Content: fmt.Sprintf(
 					"workspace checkpoint failed; refusing to run the shell command: %v", err),

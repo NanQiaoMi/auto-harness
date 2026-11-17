@@ -42,7 +42,7 @@ func TestWorkspaceCheckpointRunnerSnapshotsBeforeShell(t *testing.T) {
 	if result.Content != "ok\n" {
 		t.Fatalf("result = %+v", result)
 	}
-	if len(before.names) != 1 || before.names[0] != "bash" {
+	if len(before.names) != 1 || before.names[0] != "user_bash" {
 		t.Fatalf("checkpoint calls = %v", before.names)
 	}
 	if len(shell.commands) != 1 || shell.commands[0] != "echo ok" {
