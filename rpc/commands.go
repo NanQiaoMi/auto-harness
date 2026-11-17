@@ -258,13 +258,20 @@ type PluginsPayload struct {
 
 // PluginInfo describes one manifest or legacy plugin.
 type PluginInfo struct {
-	Name        string `json:"name"`
-	Version     string `json:"version,omitempty"`
-	Path        string `json:"path"`
-	Selected    bool   `json:"selected"`
-	State       string `json:"state"`
-	Description string `json:"description,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Name         string `json:"name"`
+	Version      string `json:"version,omitempty"`
+	Path         string `json:"path"`
+	Selected     bool   `json:"selected"`
+	State        string `json:"state"`
+	Description  string `json:"description,omitempty"`
+	Error        string `json:"error,omitempty"`
+	RestartMode  string `json:"restartMode,omitempty"`
+	RestartCount int    `json:"restartCount"`
+	MaxRestarts  int    `json:"maxRestarts"`
+	Healthy      bool   `json:"healthy"`
+	Restarting   bool   `json:"restarting,omitempty"`
+	LastExit     string `json:"lastExit,omitempty"`
+	LastError    string `json:"lastError,omitempty"`
 }
 
 // The result the bash command reports.

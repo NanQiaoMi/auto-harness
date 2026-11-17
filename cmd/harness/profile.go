@@ -306,7 +306,22 @@ func pluginsPayload(loader *extensionLoader, manager *ext.Manager) rpc.PluginsPa
 			info.State = "error"
 			info.Error = record.Err.Error()
 		case manager.ProcessExtensionLoaded(record.Extension):
-			info.State = "loaded"
+			status := record.Extension.SupervisionStatus()
+			info.RestartMode = string(status.Mode)
+			info.RestartCount = status.Restarts
+			info.MaxRestarts = status.MaxRestarts
+			info.Healthy = status.Healthy
+			info.Restarting = status.Restarting
+			info.LastExit = status.LastExit
+			info.LastError = status.LastError
+			switch {
+			case status.Restarting:
+				info.State = "restarting"
+			case status.Healthy:
+				info.State = "loaded"
+			default:
+				info.State = "unhealthy"
+			}
 		default:
 			info.State = "not_loaded"
 		}

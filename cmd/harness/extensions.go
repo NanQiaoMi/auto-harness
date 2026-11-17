@@ -304,12 +304,21 @@ func (l *extensionLoader) report(manager *ext.Manager) {
 	})
 	for _, record := range records {
 		state := "skipped by profile"
+		var status ext.SupervisionStatus
 		if record.Selected {
 			switch {
 			case record.Err != nil:
 				state = "launch error"
 			case manager.ProcessExtensionLoaded(record.Extension):
-				state = "loaded"
+				status = record.Extension.SupervisionStatus()
+				switch {
+				case status.Restarting:
+					state = "restarting"
+				case status.Healthy:
+					state = "loaded"
+				default:
+					state = "unhealthy"
+				}
 			default:
 				state = "not loaded"
 			}
@@ -322,6 +331,16 @@ func (l *extensionLoader) report(manager *ext.Manager) {
 			record.Candidate.Name(), version, state, record.Candidate.Path)
 		if record.Err != nil {
 			fmt.Printf("  error: %v\n", record.Err)
+		}
+		if status.Mode != "" {
+			fmt.Printf("  supervisor: %s, restarts %d/%d\n",
+				status.Mode, status.Restarts, status.MaxRestarts)
+		}
+		if status.LastExit != "" {
+			fmt.Printf("  last exit: %s\n", status.LastExit)
+		}
+		if status.LastError != "" {
+			fmt.Printf("  last error: %s\n", status.LastError)
 		}
 	}
 	for _, err := range l.diagnostics {
