@@ -9,10 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/NanQiaoMi/auto-harness/contextmgr"
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/session"
@@ -33,6 +33,14 @@ type Config struct {
 	SystemPrompt string
 	// MaxTokens bounds one completion (provider default when 0).
 	MaxTokens int
+	// ContextWindow overrides the model's context window for request
+	// budgeting. Zero uses the model metadata or the context manager's
+	// default.
+	ContextWindow int
+	// ContextBudget resolves the context window and maximum output for
+	// the current model. It lets a model switch update the request
+	// budget without rebuilding the agent.
+	ContextBudget func(modelID string) (contextWindow, maxOutput int)
 	// MaxTurns caps loop iterations (default 25). It is a safety net,
 	// not a substitute for the model deciding to stop.
 	MaxTurns    int
@@ -69,6 +77,9 @@ type Agent struct {
 	// Compactor compresses history on Compact when no hook provides
 	// replacement messages (see NewSummarizer).
 	Compactor Compactor
+	// Context sizes and compresses every provider request. It is
+	// optional: nil keeps the old behavior.
+	Context contextmgr.Builder
 
 	history []llm.Message
 
@@ -87,33 +98,11 @@ type Compactor func(ctx context.Context, msgs []llm.Message) ([]llm.Message, err
 // single message holding an LLM-generated summary of the conversation.
 func NewSummarizer(provider llm.Provider, model string) Compactor {
 	return func(ctx context.Context, msgs []llm.Message) ([]llm.Message, error) {
-		var b strings.Builder
-		for _, m := range msgs {
-			fmt.Fprintf(&b, "[%s] %s\n", m.Role, m.Content)
-		}
-		stream, err := provider.Chat(ctx, llm.ChatRequest{
-			Model: model,
-			System: "You compress conversation transcripts for a coding agent. " +
-				"Produce a faithful, dense summary preserving: the user's goals, decisions made, " +
-				"files changed (with paths), commands run and their outcomes, and any unfinished work. " +
-				"Output only the summary text.",
-			Messages:  []llm.Message{{Role: llm.RoleUser, Content: b.String()}},
-			MaxTokens: 2048,
-		})
+		summary, err := contextmgr.SummarizeOnce(ctx, provider, model, msgs, 2048)
 		if err != nil {
 			return nil, fmt.Errorf("agent: summarizer: %w", err)
 		}
-		msg, _, err := llm.Collect(stream, nil)
-		if err != nil {
-			return nil, fmt.Errorf("agent: summarizer: %w", err)
-		}
-		if msg == nil || msg.Content == "" {
-			return nil, fmt.Errorf("agent: summarizer produced no content")
-		}
-		return []llm.Message{{
-			Role:    llm.RoleUser,
-			Content: "【会话压缩摘要 — 此前对话已压缩，请据此继续协助】\n" + msg.Content,
-		}}, nil
+		return []llm.Message{contextmgr.SummaryMessage(summary)}, nil
 	}
 }
 
@@ -155,6 +144,13 @@ func (a *Agent) SetResolver(fn func(modelID string) (llm.Provider, error)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cfg.Resolver = fn
+}
+
+// SetContextManager installs the request-level context policy.
+func (a *Agent) SetContextManager(builder contextmgr.Builder) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Context = builder
 }
 
 // Provider returns the provider currently in use.
@@ -322,7 +318,8 @@ func (a *Agent) Run(ctx context.Context, input string) (*Result, error) {
 // token usage and the elapsed time. It carries no content.
 func (a *Agent) complete(ctx context.Context) (llm.Message, llm.Usage, ext.Request, error) {
 	// context hook: extensions may rewrite the outgoing context.
-	ctxEv := &ext.Event{Type: ext.EventContext, Messages: a.History()}
+	rawHistory := a.History()
+	ctxEv := &ext.Event{Type: ext.EventContext, Messages: rawHistory}
 	a.emit(ctxEv)
 	messages := ctxEv.Messages
 
@@ -330,12 +327,63 @@ func (a *Agent) complete(ctx context.Context) (llm.Message, llm.Usage, ext.Reque
 	// lands while the request is being built applies to the next turn,
 	// not halfway through this one.
 	cfg := a.Config()
+	tools := a.Tools.Definitions()
+	window, maxOut := a.contextLimits(cfg)
+
+	a.mu.Lock()
+	contextBuilder := a.Context
+	a.mu.Unlock()
+	if contextBuilder != nil {
+		result, err := contextBuilder.Build(ctx, contextmgr.Input{
+			SystemPrompt:    cfg.SystemPrompt,
+			Messages:        messages,
+			Tools:           tools,
+			Model:           cfg.Model,
+			ContextWindow:   window,
+			MaxOutputTokens: maxOut,
+		})
+		if err != nil {
+			if a.Logf != nil {
+				a.Logf("context: %v", err)
+			}
+		} else {
+			messages = result.Messages
+			for _, warning := range result.Warnings {
+				if a.Logf != nil {
+					a.Logf("context: %s", warning)
+				}
+			}
+			if result.Compacted && result.NewHistory != nil {
+				// A context hook may have injected transient messages;
+				// they must not be persisted into the session.
+				if sameHistory(ctxEv.Messages, rawHistory) {
+					a.SetHistory(result.NewHistory)
+					a.recordContextCompaction(result)
+					a.emit(&ext.Event{
+						Type:     ext.EventSessionCompact,
+						Messages: result.NewHistory,
+						Data: map[string]any{
+							"automatic":    true,
+							"tokensBefore": result.TokensBefore,
+							"tokensAfter":  result.TokensAfter,
+							"promptBudget": result.PromptBudget,
+							"summary":      result.Summary,
+							"artifacts":    result.Artifacts,
+							"warnings":     result.Warnings,
+						},
+					})
+				} else if a.Logf != nil {
+					a.Logf("context: compaction not persisted because a context hook rewrote the transcript")
+				}
+			}
+		}
+	}
 
 	req := llm.ChatRequest{
 		Model:       cfg.Model,
 		System:      cfg.SystemPrompt,
 		Messages:    messages,
-		Tools:       a.Tools.Definitions(),
+		Tools:       tools,
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
 		Thinking:    cfg.Thinking,
@@ -402,6 +450,51 @@ func (a *Agent) complete(ctx context.Context) (llm.Message, llm.Usage, ext.Reque
 		msg = *endEv.Message
 	}
 	return msg, usage, info, nil
+}
+
+// ContextStatus reports the active context budget and the last
+// automatic compaction. The second result is false when no inspector
+// is installed.
+func (a *Agent) ContextStatus() (contextmgr.Status, bool) {
+	cfg := a.Config()
+	messages := a.History()
+	tools := a.Tools.Definitions()
+	window, maxOut := a.contextLimits(cfg)
+
+	a.mu.Lock()
+	builder := a.Context
+	a.mu.Unlock()
+	inspector, ok := builder.(contextmgr.Inspector)
+	if !ok {
+		return contextmgr.Status{}, false
+	}
+	return inspector.Status(contextmgr.Input{
+		SystemPrompt:    cfg.SystemPrompt,
+		Messages:        messages,
+		Tools:           tools,
+		Model:           cfg.Model,
+		ContextWindow:   window,
+		MaxOutputTokens: maxOut,
+	}), true
+}
+
+// contextLimits returns the effective window and output reservation. An
+// explicit completion cap wins over the model metadata, because that is
+// the amount the provider is actually allowed to generate.
+func (a *Agent) contextLimits(cfg Config) (window, maxOut int) {
+	window = cfg.ContextWindow
+	maxOut = cfg.MaxTokens
+	if cfg.ContextBudget == nil {
+		return window, maxOut
+	}
+	modelWindow, modelMaxOut := cfg.ContextBudget(cfg.Model)
+	if window <= 0 && modelWindow > 0 {
+		window = modelWindow
+	}
+	if maxOut <= 0 && modelMaxOut > 0 {
+		maxOut = modelMaxOut
+	}
+	return window, maxOut
 }
 
 // executeTool runs one tool call and returns the tool-result message.
@@ -495,7 +588,11 @@ func (a *Agent) Compact(ctx context.Context) error {
 	}
 	a.SetHistory(msgs)
 	a.recordCompaction(msgs)
-	a.emit(&ext.Event{Type: ext.EventSessionCompact, Messages: msgs})
+	a.emit(&ext.Event{
+		Type:     ext.EventSessionCompact,
+		Messages: msgs,
+		Data:     map[string]any{"automatic": false},
+	})
 	return nil
 }
 
@@ -510,27 +607,77 @@ func (a *Agent) recordCompaction(msgs []llm.Message) {
 	if a.Session == nil || len(msgs) == 0 {
 		return
 	}
-	summary := msgs[0].Content
-	kept := len(msgs) - 1
-
-	// Find the entry the retained messages start at, by matching the
-	// last retained message against the tree's entries.
-	firstKept := ""
-	if kept > 0 {
-		want := msgs[kept]
-		for _, e := range a.Session.Tree().Entries() {
-			if e.Type != session.EntryMessage || e.Message == nil {
-				continue
-			}
-			if e.Message.Role == want.Role && e.Message.Content == want.Content {
-				firstKept = e.ID
-				break
-			}
+	summary := stripCompactionPrefix(msgs[0].Content)
+	firstKept := findKeptStart(a.Session.Tree().Branch(), msgs[1:])
+	if firstKept == "" && len(msgs) > 1 {
+		if a.Logf != nil {
+			a.Logf("session compaction: retained messages could not be located on the current branch; compaction was not persisted")
 		}
+		return
 	}
 	if err := a.Session.Compaction(summary, firstKept, 0); err != nil && a.Logf != nil {
 		a.Logf("session compaction: %v", err)
 	}
+}
+
+// recordContextCompaction persists an automatic compaction. The
+// summary is stored without its display prefix: the session tree adds
+// the prefix back when it builds model context.
+func (a *Agent) recordContextCompaction(result contextmgr.Result) {
+	if a.Session == nil || len(result.NewHistory) == 0 {
+		return
+	}
+	firstKept := findKeptStart(a.Session.Tree().Branch(), result.NewHistory[1:])
+	if firstKept == "" && len(result.NewHistory) > 1 {
+		if a.Logf != nil {
+			a.Logf("session compaction: retained messages could not be located on the current branch; compaction was not persisted")
+		}
+		return
+	}
+	if err := a.Session.Compaction(result.Summary, firstKept, result.TokensBefore); err != nil && a.Logf != nil {
+		a.Logf("session compaction: %v", err)
+	}
+}
+
+// findKeptStart finds the session entry that begins the retained
+// sequence. It matches a whole suffix, so repeated message text cannot
+// make a compaction point point at the wrong entry.
+func findKeptStart(entries []*session.Entry, kept []llm.Message) string {
+	if len(kept) == 0 {
+		return ""
+	}
+	var messages []*session.Entry
+	for _, e := range entries {
+		if e.Type == session.EntryMessage && e.Message != nil {
+			messages = append(messages, e)
+		}
+	}
+	if len(messages) < len(kept) {
+		return ""
+	}
+	for start := len(messages) - len(kept); start >= 0; start-- {
+		ok := true
+		for i := range kept {
+			if !sameMessage(*messages[start+i].Message, kept[i]) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return messages[start].ID
+		}
+	}
+	return ""
+}
+
+func sameMessage(a, b llm.Message) bool {
+	da, _ := json.Marshal(a)
+	db, _ := json.Marshal(b)
+	return bytes.Equal(da, db)
+}
+
+func stripCompactionPrefix(s string) string {
+	return contextmgr.StripSummaryPrefix(s)
 }
 
 // sameHistory reports whether two message slices hold identical content.

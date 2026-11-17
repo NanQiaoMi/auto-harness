@@ -27,6 +27,9 @@ type Config struct {
 	APIKey string `json:"api_key,omitempty"`
 	// MaxTokens bounds one completion (provider default when 0).
 	MaxTokens int `json:"max_tokens,omitempty"`
+	// Context controls request-level context budgeting and automatic
+	// compaction. Zero values use model metadata and safe defaults.
+	Context *ContextConfig `json:"context,omitempty"`
 	// MaxTurns caps agent loop iterations (default 25).
 	MaxTurns int `json:"max_turns,omitempty"`
 	// SystemPrompt replaces the built-in system prompt when non-empty.
@@ -103,6 +106,33 @@ type Config struct {
 	// TelemetryPrometheusHeaders are sent with every remote write
 	// request, e.g. an Authorization header.
 	TelemetryPrometheusHeaders map[string]string `json:"telemetry_prometheus_headers,omitempty"`
+}
+
+// ContextConfig configures the context window and compression pipeline.
+type ContextConfig struct {
+	// Window overrides the model catalog's context window.
+	Window int `json:"window,omitempty"`
+	// ReserveTokens is the safety margin for tokenizer differences.
+	ReserveTokens int `json:"reserve_tokens,omitempty"`
+	// CompactAt is the fraction of the prompt budget at which
+	// automatic compaction starts. Default 0.75.
+	CompactAt float64 `json:"compact_at,omitempty"`
+	// KeepRecentTokens is the approximate recent transcript budget.
+	KeepRecentTokens int `json:"keep_recent_tokens,omitempty"`
+	// KeepRecentMessages is the minimum number of recent units kept.
+	KeepRecentMessages int `json:"keep_recent_messages,omitempty"`
+	// SummaryMaxTokens bounds one context-capsule completion.
+	SummaryMaxTokens int `json:"summary_max_tokens,omitempty"`
+	// SummaryChunkTokens bounds one summarizer input chunk.
+	SummaryChunkTokens int `json:"summary_chunk_tokens,omitempty"`
+	// ArtifactThreshold is the byte size at which tool output moves to
+	// the artifact store.
+	ArtifactThreshold int `json:"artifact_threshold,omitempty"`
+	// ArtifactPreview is the number of bytes kept in the prompt.
+	ArtifactPreview int `json:"artifact_preview,omitempty"`
+	// ArtifactDir stores oversized tool output. Empty uses
+	// <session_dir>/artifacts/<session-id>.
+	ArtifactDir string `json:"artifact_dir,omitempty"`
 }
 
 // TelemetryInterval returns how often the metrics go out.
@@ -203,6 +233,9 @@ func merge(dst *Config, src Config) {
 	}
 	if src.MaxTokens > 0 {
 		dst.MaxTokens = src.MaxTokens
+	}
+	if src.Context != nil {
+		dst.Context = src.Context
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
