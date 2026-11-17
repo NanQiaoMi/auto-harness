@@ -224,6 +224,71 @@ func (s *Session) SetLeaf(id string) error {
 	return nil
 }
 
+// CurrentLeaf returns the entry at the current position. An empty value
+// means the session is positioned before its first conversational entry.
+func (s *Session) CurrentLeaf() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tree == nil {
+		return ""
+	}
+	return s.tree.LeafID()
+}
+
+// CheckpointAnchor returns the position before the latest user turn.
+//
+// Automatic workspace checkpoints are taken after the assistant asked
+// for a tool but before the tool ran. Restoring the parent of the latest
+// user message therefore removes the whole turn instead of leaving a
+// dangling assistant tool call without its result.
+func (s *Session) CheckpointAnchor() string {
+	anchor, _ := s.TurnBinding()
+	return anchor
+}
+
+// CurrentTurn returns the entry ID of the latest user message on the
+// current branch. It identifies the turn that automatic checkpoints
+// belong to, which disambiguates branches created from the same parent.
+func (s *Session) CurrentTurn() string {
+	_, turn := s.TurnBinding()
+	return turn
+}
+
+// TurnBinding returns the latest user turn and the position before it.
+// Both values come from one locked snapshot so a checkpoint cannot mix
+// the anchor of one turn with the ID of the next.
+func (s *Session) TurnBinding() (anchor, turn string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tree == nil {
+		return "", ""
+	}
+	path := s.tree.CurrentPath()
+	for i := len(path) - 1; i >= 0; i-- {
+		entry := path[i]
+		if entry.Type == EntryMessage && entry.Message != nil &&
+			entry.Message.Role == llm.RoleUser {
+			return entry.ParentID, entry.ID
+		}
+	}
+	return "", ""
+}
+
+// CanSetLeaf reports whether id is the empty pre-session position or an
+// entry in this session.
+func (s *Session) CanSetLeaf(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tree == nil {
+		return false
+	}
+	if id == "" {
+		return true
+	}
+	_, ok := s.tree.Entry(id)
+	return ok
+}
+
 // Branch returns the entries of the current branch.
 func (s *Session) Branch() []*Entry {
 	s.mu.Lock()

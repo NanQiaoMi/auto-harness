@@ -161,13 +161,14 @@ func (t *Tree) Append(e *Entry) string {
 	switch e.Type {
 	case EntryLeafPointer:
 		// The leaf moved: record the pointer without adding it to the
-		// branch.
+		// branch. An empty LeafID deliberately clears the leaf, which is
+		// how an undone first turn is represented.
 		t.entries[e.ID] = e
 		t.order = append(t.order, e.ID)
-		if e.LeafID != "" {
-			if _, ok := t.entries[e.LeafID]; ok {
-				t.leafID = e.LeafID
-			}
+		if e.LeafID == "" {
+			t.leafID = ""
+		} else if _, ok := t.entries[e.LeafID]; ok {
+			t.leafID = e.LeafID
 		}
 		return e.ID
 	case EntryModelChange:
@@ -208,6 +209,10 @@ func (t *Tree) AppendMessage(msg llm.Message) string {
 // Moving to an entry that is not on the current branch is allowed:
 // the tree keeps every branch.
 func (t *Tree) SetLeaf(id string) error {
+	if id == "" {
+		t.leafID = ""
+		return nil
+	}
 	if _, ok := t.entries[id]; !ok {
 		return fmt.Errorf("session: no such entry %q", id)
 	}
