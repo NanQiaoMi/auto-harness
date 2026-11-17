@@ -23,6 +23,14 @@ const handshakeTimeout = 10 * time.Second
 // treated as one that cannot vouch for the operation.
 const consultTimeout = 5 * time.Second
 
+// Plugin capability names. A process extension with a nil Capabilities
+// slice keeps the legacy behavior and may use every surface.
+const (
+	CapabilityTools  = "tools"
+	CapabilityHooks  = "hooks"
+	CapabilityEvents = "events"
+)
+
 // ProcessExtension runs an external extension process and bridges it into
 // the harness: the tools it advertises become regular tools, the events
 // it pushes are dispatched on the host bus, and the events it is
@@ -39,6 +47,10 @@ type ProcessExtension struct {
 	Dir string
 	// Env adds environment variables to the child process.
 	Env []string
+	// Capabilities limits the surfaces the runtime manifest may use.
+	// nil means unrestricted (legacy plugins); a non-nil list is an
+	// explicit grant.
+	Capabilities []string
 
 	mu   sync.Mutex
 	conn *rpcConn
@@ -92,6 +104,12 @@ func (e *ProcessExtension) Setup(api *API) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ext: %s: start: %w", e.Command, err)
 	}
+	setupComplete := false
+	defer func() {
+		if !setupComplete {
+			_ = e.Stop()
+		}
+	}()
 
 	conn := newRPCConn(stdout, stdin, stdin)
 	e.mu.Lock()
@@ -107,7 +125,6 @@ func (e *ProcessExtension) Setup(api *API) error {
 	// extension from hanging the harness.
 	var manifest Manifest
 	if err := conn.callTimeout(MethodManifest, nil, &manifest, handshakeTimeout); err != nil {
-		_ = cmd.Process.Kill()
 		return fmt.Errorf("ext: %s: manifest: %w", e.Command, err)
 	}
 	if manifest.Name == "" {
@@ -116,6 +133,12 @@ func (e *ProcessExtension) Setup(api *API) error {
 	e.mu.Lock()
 	e.manifest = manifest
 	e.mu.Unlock()
+	if len(manifest.Tools) > 0 && !e.allows(CapabilityTools) {
+		return fmt.Errorf("ext: %s: manifest provides tools without the %q capability", e.Command, CapabilityTools)
+	}
+	if len(manifest.Consults) > 0 && !e.allows(CapabilityHooks) {
+		return fmt.Errorf("ext: %s: manifest consults events without the %q capability", e.Command, CapabilityHooks)
+	}
 
 	// Register the remote tools as local tools.
 	for _, mt := range manifest.Tools {
@@ -162,6 +185,7 @@ func (e *ProcessExtension) Setup(api *API) error {
 		e.consult(ev)
 		return nil
 	})
+	setupComplete = true
 	return nil
 }
 
@@ -309,6 +333,9 @@ func (e *ProcessExtension) handleNotification(api *API, msg Protocol) {
 	if msg.Method != MethodEvent {
 		return
 	}
+	if !e.allows(CapabilityEvents) {
+		return
+	}
 	var params EventParams
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		return
@@ -318,6 +345,20 @@ func (e *ProcessExtension) handleNotification(api *API, msg Protocol) {
 		Text: params.Text,
 		Data: params.Data,
 	})
+}
+
+func (e *ProcessExtension) allows(capability string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.Capabilities == nil {
+		return true
+	}
+	for _, allowed := range e.Capabilities {
+		if allowed == capability {
+			return true
+		}
+	}
+	return false
 }
 
 // connection returns the live connection, if any.
