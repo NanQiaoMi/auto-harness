@@ -36,6 +36,16 @@ func decodeArgs(args json.RawMessage, v any) error {
 
 // NewReadTool returns the file-reading tool.
 func NewReadTool() *Tool {
+	return newReadTool("")
+}
+
+// NewReadToolAt returns a read tool rooted at a workspace. Relative
+// paths resolve from root and a path outside it is rejected.
+func NewReadToolAt(root string) *Tool {
+	return newReadTool(root)
+}
+
+func newReadTool(root string) *Tool {
 	return &Tool{
 		Name:          "read",
 		Label:         "Read File",
@@ -73,9 +83,13 @@ func NewReadTool() *Tool {
 			if err := decodeArgs(args, &params); err != nil {
 				return Result{Content: err.Error(), IsError: true}, nil
 			}
-			data, err := os.ReadFile(params.Path)
+			path, err := resolveWorkspacePath(root, params.Path)
 			if err != nil {
-				return Result{Content: fmt.Sprintf("read %s: %v", params.Path, err), IsError: true}, nil
+				return Result{Content: err.Error(), IsError: true}, nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return Result{Content: fmt.Sprintf("read %s: %v", path, err), IsError: true}, nil
 			}
 			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 			offset := params.Offset
@@ -108,6 +122,15 @@ func NewReadTool() *Tool {
 
 // NewWriteTool returns the file-writing tool.
 func NewWriteTool() *Tool {
+	return newWriteTool("")
+}
+
+// NewWriteToolAt returns a write tool rooted at a workspace.
+func NewWriteToolAt(root string) *Tool {
+	return newWriteTool(root)
+}
+
+func newWriteTool(root string) *Tool {
 	return &Tool{
 		Name:          "write",
 		Label:         "Write File",
@@ -139,18 +162,22 @@ func NewWriteTool() *Tool {
 			if err := decodeArgs(args, &params); err != nil {
 				return Result{Content: err.Error(), IsError: true}, nil
 			}
+			path, err := resolveWorkspacePath(root, params.Path)
+			if err != nil {
+				return Result{Content: err.Error(), IsError: true}, nil
+			}
 			// The write takes the file's queue, so it cannot interleave
 			// with an edit of the same file.
 			var writeErr error
-			err := WithFileMutation(params.Path, func() error {
-				if dir := filepath.Dir(params.Path); dir != "" {
+			err = WithFileMutation(path, func() error {
+				if dir := filepath.Dir(path); dir != "" {
 					if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
-						writeErr = fmt.Errorf("write %s: %w", params.Path, mkErr)
+						writeErr = fmt.Errorf("write %s: %w", path, mkErr)
 						return nil
 					}
 				}
-				if wErr := os.WriteFile(params.Path, []byte(params.Content), 0o644); wErr != nil {
-					writeErr = fmt.Errorf("write %s: %w", params.Path, wErr)
+				if wErr := os.WriteFile(path, []byte(params.Content), 0o644); wErr != nil {
+					writeErr = fmt.Errorf("write %s: %w", path, wErr)
 				}
 				return nil
 			})
@@ -158,15 +185,24 @@ func NewWriteTool() *Tool {
 				return Result{Content: writeErr.Error(), IsError: true}, nil
 			}
 			if err != nil {
-				return Result{Content: fmt.Sprintf("write %s: %v", params.Path, err), IsError: true}, nil
+				return Result{Content: fmt.Sprintf("write %s: %v", path, err), IsError: true}, nil
 			}
-			return Result{Content: fmt.Sprintf("Wrote %d bytes to %s", len(params.Content), params.Path)}, nil
+			return Result{Content: fmt.Sprintf("Wrote %d bytes to %s", len(params.Content), path)}, nil
 		},
 	}
 }
 
 // NewEditTool returns the exact string replacement tool.
 func NewEditTool() *Tool {
+	return newEditTool("")
+}
+
+// NewEditToolAt returns an edit tool rooted at a workspace.
+func NewEditToolAt(root string) *Tool {
+	return newEditTool(root)
+}
+
+func newEditTool(root string) *Tool {
 	return &Tool{
 		Name:          "edit",
 		Label:         "Edit File",
@@ -208,25 +244,29 @@ func NewEditTool() *Tool {
 			if err := decodeArgs(args, &params); err != nil {
 				return Result{Content: err.Error(), IsError: true}, nil
 			}
+			path, err := resolveWorkspacePath(root, params.Path)
+			if err != nil {
+				return Result{Content: err.Error(), IsError: true}, nil
+			}
 			// The edit takes the file's queue: it reads the file and
 			// writes it back, and a write of the same file must not
 			// slip in between.
 			var editErr error
 			var replaced int
-			err := WithFileMutation(params.Path, func() error {
-				data, readErr := os.ReadFile(params.Path)
+			err = WithFileMutation(path, func() error {
+				data, readErr := os.ReadFile(path)
 				if readErr != nil {
-					editErr = fmt.Errorf("edit %s: %w", params.Path, readErr)
+					editErr = fmt.Errorf("edit %s: %w", path, readErr)
 					return nil
 				}
 				content := string(data)
 				count := strings.Count(content, params.OldString)
 				switch {
 				case count == 0:
-					editErr = fmt.Errorf("edit %s: old_string not found", params.Path)
+					editErr = fmt.Errorf("edit %s: old_string not found", path)
 					return nil
 				case count > 1 && !params.ReplaceAll:
-					editErr = fmt.Errorf("edit %s: old_string occurs %d times; add context to make it unique or set replace_all", params.Path, count)
+					editErr = fmt.Errorf("edit %s: old_string occurs %d times; add context to make it unique or set replace_all", path, count)
 					return nil
 				}
 				var updated string
@@ -237,8 +277,8 @@ func NewEditTool() *Tool {
 					updated = strings.Replace(content, params.OldString, params.NewString, 1)
 					replaced = 1
 				}
-				if wErr := os.WriteFile(params.Path, []byte(updated), 0o644); wErr != nil {
-					editErr = fmt.Errorf("edit %s: %w", params.Path, wErr)
+				if wErr := os.WriteFile(path, []byte(updated), 0o644); wErr != nil {
+					editErr = fmt.Errorf("edit %s: %w", path, wErr)
 				}
 				return nil
 			})
@@ -246,9 +286,76 @@ func NewEditTool() *Tool {
 				return Result{Content: editErr.Error(), IsError: true}, nil
 			}
 			if err != nil {
-				return Result{Content: fmt.Sprintf("edit %s: %v", params.Path, err), IsError: true}, nil
+				return Result{Content: fmt.Sprintf("edit %s: %v", path, err), IsError: true}, nil
 			}
-			return Result{Content: fmt.Sprintf("Replaced %d occurrence(s) in %s", replaced, params.Path)}, nil
+			return Result{Content: fmt.Sprintf("Replaced %d occurrence(s) in %s", replaced, path)}, nil
 		},
+	}
+}
+
+// resolveWorkspacePath resolves path against root and rejects escapes.
+// With an empty root, the path is returned unchanged for the primary
+// agent's historical behavior.
+func resolveWorkspacePath(root, path string) (string, error) {
+	if root == "" {
+		return path, nil
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("path must not be empty")
+	}
+	candidate := path
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(root, filepath.FromSlash(candidate))
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	absPath, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace %s: %w", absRoot, err)
+	}
+	realPath, err := resolveSymlinkPath(absPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %s: %w", path, err)
+	}
+	rel, err := filepath.Rel(realRoot, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %s is outside the delegated workspace %s", path, absRoot)
+	}
+	return absPath, nil
+}
+
+// resolveSymlinkPath resolves the existing prefix of path and appends
+// the not-yet-created suffix. A dangling symlink is an error rather than
+// a missing file: writing through it could create a file outside the
+// workspace after the containment check.
+func resolveSymlinkPath(path string) (string, error) {
+	path = filepath.Clean(path)
+	current := path
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if _, statErr := os.Lstat(current); statErr == nil {
+			return "", err
+		} else if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
 	}
 }

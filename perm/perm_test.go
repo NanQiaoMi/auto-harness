@@ -274,6 +274,74 @@ func TestGuardNormalizesPaths(t *testing.T) {
 	}
 }
 
+// TestGuardResolvesDelegatedPathsAgainstWorkspace verifies a
+// subagent's relative path is checked in its own worktree, not the
+// parent process working directory.
+func TestGuardResolvesDelegatedPathsAgainstWorkspace(t *testing.T) {
+	bus := ext.NewBus()
+	api := ext.NewAPI(bus, tools.NewRegistry(), ext.NewCommandRegistry())
+
+	parentWorkdir := t.TempDir()
+	workspace := t.TempDir()
+	set := NewSet(ActionAllow)
+	set.Rules = []Rule{
+		{Name: "deny subagent secret", Tools: []string{"write"},
+			Paths:  []string{filepath.Join(workspace, "secret") + "*"},
+			Action: ActionDeny},
+	}
+	guard := NewGuard(set, parentWorkdir)
+	if err := guard.Setup(api); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	ev := &ext.Event{
+		Type:     ext.EventToolCall,
+		ToolCall: &llm.ToolCall{Name: "write", Arguments: json.RawMessage(`{"path":"secret/report.txt"}`)},
+	}
+	ext.SetDelegation(ev, "sub-1", "", workspace)
+	if err := bus.Emit(ev); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if !ev.Block {
+		t.Fatal("relative delegated path was not resolved against its workspace")
+	}
+}
+
+// TestGuardDelegatedAskFailsClosed verifies that a background agent
+// cannot borrow the primary terminal approver.
+func TestGuardDelegatedAskFailsClosed(t *testing.T) {
+	bus := ext.NewBus()
+	api := ext.NewAPI(bus, tools.NewRegistry(), ext.NewCommandRegistry())
+
+	approverCalled := false
+	guard := NewGuard(NewSet(ActionAsk), t.TempDir())
+	guard.Approver = ApproverFunc(func(context.Context, Call, *Rule) (bool, error) {
+		approverCalled = true
+		return true, nil
+	})
+	if err := guard.Setup(api); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	ev := &ext.Event{
+		Type:     ext.EventToolCall,
+		ToolCall: &llm.ToolCall{Name: "bash", Arguments: json.RawMessage(`{"command":"ls"}`)},
+	}
+	ext.SetDelegation(ev, "sub-1", "", t.TempDir())
+	if err := bus.Emit(ev); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if !ev.Block {
+		t.Fatal("delegated call that needs confirmation was not blocked")
+	}
+	if approverCalled {
+		t.Fatal("delegated call invoked the primary terminal approver")
+	}
+	if !strings.Contains(ev.BlockReason, "pre-approved") {
+		t.Fatalf("block reason = %q", ev.BlockReason)
+	}
+}
+
 // TestBuiltinRulesAreConservative verifies the default rules deny the
 // clearly destructive operations and allow reading.
 func TestBuiltinRulesAreConservative(t *testing.T) {

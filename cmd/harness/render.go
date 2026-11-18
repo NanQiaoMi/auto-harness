@@ -87,7 +87,7 @@ func (n *toolNotice) result(call *llm.ToolCall, result *tools.Result, expanded b
 // so a quiet session stays quiet.
 func (n *toolNotice) install(bus *ext.Bus, quiet bool, expanded func() bool, write func(string)) {
 	bus.On(ext.EventToolExecutionStart, func(e *ext.Event) error {
-		if quiet || e.ToolCall == nil {
+		if quiet || e.ToolCall == nil || ext.AgentID(e) != "" {
 			return nil
 		}
 		for _, line := range n.call(e.ToolCall) {
@@ -96,7 +96,7 @@ func (n *toolNotice) install(bus *ext.Bus, quiet bool, expanded func() bool, wri
 		return nil
 	})
 	bus.On(ext.EventToolExecutionEnd, func(e *ext.Event) error {
-		if quiet || e.ToolCall == nil || e.ToolResult == nil {
+		if quiet || e.ToolCall == nil || e.ToolResult == nil || ext.AgentID(e) != "" {
 			return nil
 		}
 		lines := n.result(e.ToolCall, e.ToolResult, expanded())

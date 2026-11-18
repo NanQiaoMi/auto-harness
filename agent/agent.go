@@ -31,6 +31,14 @@ type Config struct {
 	Provider     llm.Provider
 	Model        string
 	SystemPrompt string
+	// AgentID identifies this agent in events. The primary agent leaves
+	// it empty; a delegated agent receives the orchestrator task ID.
+	AgentID string
+	// ParentAgentID identifies the delegated agent that started this
+	// one, when applicable.
+	ParentAgentID string
+	// Workspace is the working tree this agent's path tools use.
+	Workspace string
 	// MaxTokens bounds one completion (provider default when 0).
 	MaxTokens int
 	// ContextWindow overrides the model's context window for request
@@ -769,6 +777,8 @@ func (a *Agent) emit(e *ext.Event) {
 	if a.Bus == nil {
 		return
 	}
+	cfg := a.Config()
+	ext.SetDelegation(e, cfg.AgentID, cfg.ParentAgentID, cfg.Workspace)
 	if err := a.Bus.Emit(e); err != nil && a.Logf != nil {
 		a.Logf("hook %s: %v", e.Type, err)
 	}

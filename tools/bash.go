@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 )
@@ -19,17 +20,29 @@ type SandboxRunner func(ctx context.Context, command, workdir string) (output st
 // NewBashTool returns the shell execution tool. Commands run via
 // /bin/bash -c with a timeout; stdout and stderr are merged and truncated.
 func NewBashTool() *Tool {
-	return newBashTool(nil)
+	return newBashToolAt("", nil)
 }
 
 // NewSandboxedBashTool returns a bash tool whose commands run inside
 // the given operating-system sandbox.
 func NewSandboxedBashTool(runner SandboxRunner) *Tool {
-	return newBashTool(runner)
+	return newBashToolAt("", runner)
 }
 
-// newBashTool builds the bash tool with an optional sandbox runner.
-func newBashTool(runner SandboxRunner) *Tool {
+// NewBashToolAt returns a bash tool whose default directory is root and
+// whose relative workdir argument is confined to root.
+func NewBashToolAt(root string) *Tool {
+	return newBashToolAt(root, nil)
+}
+
+// NewSandboxedBashToolAt is NewBashToolAt with an OS sandbox runner.
+func NewSandboxedBashToolAt(root string, runner SandboxRunner) *Tool {
+	return newBashToolAt(root, runner)
+}
+
+// newBashToolAt builds the bash tool with an optional workspace root
+// and sandbox runner.
+func newBashToolAt(root string, runner SandboxRunner) *Tool {
 	return &Tool{
 		Name:          "bash",
 		Label:         "Bash",
@@ -66,6 +79,10 @@ func newBashTool(runner SandboxRunner) *Tool {
 			if err := decodeArgs(args, &params); err != nil {
 				return Result{Content: err.Error(), IsError: true}, nil
 			}
+			workdir, err := resolveCommandWorkdir(root, params.Workdir)
+			if err != nil {
+				return Result{Content: err.Error(), IsError: true}, nil
+			}
 			timeout := defaultBashTimeout
 			if params.TimeoutMS > 0 {
 				timeout = time.Duration(params.TimeoutMS) * time.Millisecond
@@ -74,11 +91,10 @@ func newBashTool(runner SandboxRunner) *Tool {
 			defer cancel()
 
 			var out []byte
-			var err error
 			if runner != nil {
 				// The sandbox runner reports whether it actually
 				// confined the command.
-				text, sandboxed, runErr := runner(runCtx, params.Command, params.Workdir)
+				text, sandboxed, runErr := runner(runCtx, params.Command, workdir)
 				out = []byte(text)
 				err = runErr
 				if !sandboxed {
@@ -86,8 +102,8 @@ func newBashTool(runner SandboxRunner) *Tool {
 				}
 			} else {
 				cmd := exec.CommandContext(runCtx, "/bin/bash", "-c", params.Command)
-				if params.Workdir != "" {
-					cmd.Dir = params.Workdir
+				if workdir != "" {
+					cmd.Dir = workdir
 				}
 				out, err = cmd.CombinedOutput()
 			}
@@ -118,4 +134,28 @@ func newBashTool(runner SandboxRunner) *Tool {
 			return result, nil
 		},
 	}
+}
+
+// resolveCommandWorkdir resolves the bash tool's optional working
+// directory. With a workspace root, absolute paths and relative paths
+// must stay inside it.
+func resolveCommandWorkdir(root, value string) (string, error) {
+	if root == "" {
+		return value, nil
+	}
+	if value == "" {
+		return root, nil
+	}
+	dir, err := resolveWorkspacePath(root, value)
+	if err != nil {
+		return "", fmt.Errorf("bash workdir: %w", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("bash workdir %s is not a directory", value)
+	}
+	return dir, nil
 }

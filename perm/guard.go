@@ -175,9 +175,13 @@ func (g *Guard) check(e *ext.Event) {
 		Tool: e.ToolCall.Name,
 		Args: decodeArgs(e.ToolCall.Arguments),
 	}
+	workdir := g.Workdir
+	if workspace := ext.Workspace(e); workspace != "" {
+		workdir = workspace
+	}
 	// The target path, when the tool has one.
 	if raw, ok := call.Args["path"].(string); ok {
-		call.Path = NormalizePath(raw, g.Workdir)
+		call.Path = NormalizePath(raw, workdir)
 	}
 
 	decision, rule := g.Set.Evaluate(call)
@@ -202,6 +206,14 @@ func (g *Guard) check(e *ext.Event) {
 	// The call needs confirmation.
 	g.count(&g.asked)
 	approver := g.Approver
+	if ext.AgentID(e) != "" {
+		// A delegated agent runs in the background. Prompting on the
+		// primary terminal would interleave with the REPL, so a call
+		// that was not pre-approved fails closed.
+		approver = DenyApprover{
+			Reason: "delegated agents require pre-approved permission rules",
+		}
+	}
 	if approver == nil {
 		approver = DenyApprover{}
 	}
@@ -214,13 +226,27 @@ func (g *Guard) check(e *ext.Event) {
 	}
 	if !allowed {
 		e.Block = true
-		e.BlockReason = "the user did not approve the call"
+		e.BlockReason = approvalDenialReason(approver)
 		g.count(&g.blocked)
 		g.log("declined %s", call.Tool)
 		return
 	}
 	g.count(&g.allowed)
 	g.log("approved %s", call.Tool)
+}
+
+func approvalDenialReason(approver Approver) string {
+	switch deny := approver.(type) {
+	case DenyApprover:
+		if deny.Reason != "" {
+			return deny.Reason
+		}
+	case *DenyApprover:
+		if deny != nil && deny.Reason != "" {
+			return deny.Reason
+		}
+	}
+	return "the user did not approve the call"
 }
 
 // count increments a counter.

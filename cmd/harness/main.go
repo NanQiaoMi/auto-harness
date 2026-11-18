@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/NanQiaoMi/auto-harness/agent"
 	"github.com/NanQiaoMi/auto-harness/config"
@@ -21,6 +22,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/gitkit"
 	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/orchestrator"
 	"github.com/NanQiaoMi/auto-harness/perm"
 	"github.com/NanQiaoMi/auto-harness/session"
 	"github.com/NanQiaoMi/auto-harness/shellext"
@@ -63,6 +65,7 @@ func main() {
 		pluginUnsigned   = flag.Bool("plugin-allow-unsigned", false, "allow an unsigned remote plugin registry")
 		noGitCheckpoints = flag.Bool("no-git-checkpoints", false, "disable automatic workspace checkpoints")
 		checkpointLimit  = flag.Int("checkpoint-limit", gitkit.DefaultCheckpointLimit, "maximum retained workspace checkpoints")
+		noSubagents      = flag.Bool("no-subagents", false, "disable delegated background agents")
 	)
 	flag.Parse()
 
@@ -368,7 +371,12 @@ func main() {
 	mcpSetup := loadMCPServers(ctx, cfg, workdir(), registry, trustSetup.decision.Trusted,
 		mcpSelection, childEnv)
 	defer mcpSetup.manager.Close()
+	var subagents *orchestrator.Manager
+	var subagentRuntimeRef *subagentRuntime
 	shutdownRuntime := func() {
+		if subagents != nil {
+			_ = subagents.Close()
+		}
 		mcpSetup.manager.Close()
 		extMgr.Shutdown()
 		telemetrySetup.Close()
@@ -417,12 +425,6 @@ func main() {
 		failStartup(fmt.Errorf("agent profile selections were not found: %s", strings.Join(missingContent, ", ")),
 			shutdownRuntime)
 	}
-	if activeProfile != nil && activeProfile.Tools != nil {
-		if err := registry.SetActiveToolsExact(activeProfile.Tools); err != nil {
-			failStartup(fmt.Errorf("agent profile tools: %w", err), shutdownRuntime)
-		}
-	}
-
 	contextOpts := contextmgr.Options{}
 	configuredWindow := 0
 	if cfg.Context != nil {
@@ -518,6 +520,67 @@ func main() {
 	)
 	ag.SetContextManager(contextMgr)
 
+	// Delegated agents reuse the provider registry and extension bus but
+	// receive fresh sessions, context managers and workspace-bound tools.
+	if !*noSubagents {
+		maxConcurrent := orchestrator.DefaultMaxConcurrent
+		maxDepth := orchestrator.DefaultMaxDepth
+		timeout := orchestrator.DefaultTimeout
+		resultLimit := orchestrator.DefaultResultLimit
+		if cfg.Subagents != nil {
+			if cfg.Subagents.MaxConcurrent > 0 {
+				maxConcurrent = cfg.Subagents.MaxConcurrent
+			}
+			if cfg.Subagents.MaxDepth > 0 {
+				maxDepth = cfg.Subagents.MaxDepth
+			}
+			if cfg.Subagents.TimeoutSeconds > 0 {
+				timeout = time.Duration(cfg.Subagents.TimeoutSeconds) * time.Second
+			}
+			if cfg.Subagents.ResultBytes > 0 {
+				resultLimit = cfg.Subagents.ResultBytes
+			}
+		}
+		storeDir := filepath.Join(filepath.Dir(sess.Path), "subagents", sess.Meta.ID)
+		runtime := &subagentRuntime{
+			parent:             ag,
+			cfg:                cfg,
+			bus:                bus,
+			registry:           registry,
+			llmReg:             llmReg,
+			contextOpts:        contextOpts,
+			checkpointLimit:    *checkpointLimit,
+			checkpointsEnabled: !*noGitCheckpoints,
+			maxDepth:           maxDepth,
+			parentWorkdir:      workdir(),
+			storeDir:           storeDir,
+			sessionDir:         filepath.Dir(sess.Path),
+			quiet:              *quiet,
+		}
+		runtime.parentSessionPath.set(sess.Path)
+		subagentRuntimeRef = runtime
+		subagents, err = orchestrator.New(ctx, orchestrator.Config{
+			MaxConcurrent: maxConcurrent,
+			MaxDepth:      maxDepth,
+			Timeout:       timeout,
+			ResultLimit:   resultLimit,
+			StoreDir:      storeDir,
+			Factory:       runtime.factory,
+		})
+		if err != nil {
+			failStartup(fmt.Errorf("delegated agents: %w", err), shutdownRuntime)
+		}
+		defer subagents.Close()
+		if err := registry.Register(orchestrator.NewAgentTool(subagents)); err != nil {
+			failStartup(fmt.Errorf("delegated agent tool: %w", err), shutdownRuntime)
+		}
+	}
+	if activeProfile != nil && activeProfile.Tools != nil {
+		if err := registry.SetActiveToolsExact(activeProfile.Tools); err != nil {
+			failStartup(fmt.Errorf("agent profile tools: %w", err), shutdownRuntime)
+		}
+	}
+
 	// The "!" shortcut runs the user's own shell commands, through the
 	// same bash tool, so the sandbox applies to them too.
 	var userShellRunner shellext.Runner = &shellext.ToolRunner{Tool: bashTool}
@@ -544,6 +607,9 @@ func main() {
 	// off the stream instead.
 	if !*tuiMode && !*rpcMode && !jsonOutput {
 		bus.On(ext.EventMessageUpdate, func(e *ext.Event) error {
+			if ext.AgentID(e) != "" {
+				return nil
+			}
 			if e.Data != nil {
 				if t, _ := e.Data["thinking"].(bool); t {
 					if *showThinking {
@@ -608,7 +674,7 @@ func main() {
 	if *rpcMode {
 		if err := runRPCMode(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr,
 			loader, mcpSetup, permSetup, telemetrySetup, shellShortcut, promptSetup,
-			skillSetup, trustSetup, profileSetup, checkpointMgr, *quiet); err != nil {
+			skillSetup, trustSetup, profileSetup, checkpointMgr, subagents, subagentRuntimeRef, *quiet); err != nil {
 			fmt.Fprintf(os.Stderr, "harness: %v\n", err)
 			exitStatus(1, shutdownRuntime)
 		}
@@ -617,7 +683,7 @@ func main() {
 
 	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup,
 		telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, profileSetup,
-		checkpointMgr, lines, *quiet, *tuiMode)
+		checkpointMgr, subagents, lines, *quiet, *tuiMode)
 }
 
 // workdir returns the current working directory, used to locate the
@@ -638,9 +704,9 @@ func sessionReason(resumed string) string {
 }
 
 // runREPL is the interactive loop.
-func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, lines perm.LineReader, quiet bool, tuiMode bool) {
+func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, subagents *orchestrator.Manager, lines perm.LineReader, quiet bool, tuiMode bool) {
 	gitOut := newCommandOutput(os.Stdout)
-	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, checkpointMgr, gitOut, &quiet)
+	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, checkpointMgr, subagents, gitOut, &quiet)
 
 	// The prompt templates are slash commands like any other, so they
 	// live on the same registry. They are installed once here; the TUI
@@ -746,9 +812,10 @@ func handleCommand(ctx context.Context, commands *ext.CommandRegistry, line stri
 
 // registerBuiltinCommands wires the REPL's own slash commands through
 // the same registry extensions use.
-func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, profileSetup *profileSetup, skillSetup *skillSetup, promptSetup *promptSetup, checkpointMgr *gitkit.Manager, gitOut io.Writer, quiet *bool) {
+func registerBuiltinCommands(commands *ext.CommandRegistry, ag *agent.Agent, sess *session.Session, bus *ext.Bus, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, trustSetup *trustSetup, profileSetup *profileSetup, skillSetup *skillSetup, promptSetup *promptSetup, checkpointMgr *gitkit.Manager, subagents *orchestrator.Manager, gitOut io.Writer, quiet *bool) {
 	registerTreeCommands(commands, &treeSession{sess: sess, ag: ag, dir: cfg.SessionDir, bus: bus})
 	registerGitCommands(commands, checkpointMgr, ag, sess, gitOut)
+	registerAgentCommands(commands, subagents, gitOut)
 	commands.Register("trust", &ext.Command{
 		Description: "show or set the project trust decision",
 		Handler: func(ctx context.Context, args string) error {
