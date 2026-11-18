@@ -31,6 +31,7 @@ gitkit/               内置 Git 与逐步回退
   git_tool.go           模型直接调用的 git 工具（参数数组 + stdin）
   checkpoint.go         工作树 / 精确 index / HEAD / refs / stash 检查点
   checkpoint_tool.go    模型侧 checkpoint 工具（create / list / restore）
+orchestrator/         委派子代理：并发、深度、超时、取消、持久化任务记录
 ext/                  扩展系统：事件总线 + Extension API + 加载器         ← pi.ExtensionAPI
   ext.go                事件总线、Extension API（hooks / 工具 / 命令 / 渲染器）
   loader.go             Manager：加载、卸载、热重载  scope.go              注册作用域：记录扩展注册了什么，重载时自动撤销
@@ -121,6 +122,7 @@ config/               配置：默认值 < ~/.harness/config.json < 环境变量
 | `pi-coding-agent` `!` 快捷  | `shellext`                   | 用户直接跑 shell 命令 |
 | `pi-coding-agent` 文件变更队列 | `tools/mutation_queue.go`  | 同一文件的改动串行化 |
 | （pi 无内置 Git 检查点）     | `gitkit`                     | 内置 Git 工具 + 工作区逐步回退 |
+| （pi 无内置委派编排）        | `orchestrator`               | 隔离子代理、独立上下文、持久化任务 |
 | `pi-coding-agent` Prompt 模板 | `prompts`                   | markdown 文件变成斜杠命令 + 参数替换 |
 | `pi-coding-agent` AGENTS.md  | `projcontext`               | 项目指示 + SYSTEM.md 替换系统提示词 |
 | `pi-coding-agent` Skills   | `skills`                    | SKILL.md 技能库 + 渐进披露 + /skill:name |
@@ -269,6 +271,9 @@ export OPENAI_API_KEY=oc_sk-...
 # 工作区回退：默认在每次修改型工具前建立 Git 检查点
 ./bin/harness -checkpoint-limit 200
 ./bin/harness -no-git-checkpoints          # 只关闭自动快照，手动回退仍可用
+
+# 委派子代理（默认启用；-no-subagents 关闭 agent 工具和后台任务）
+./bin/harness -no-subagents
 
 # RPC 模式：stdin 收 JSON 命令，stdout 吐 JSON 记录，被别的程序驱动
 ./bin/harness -rpc
@@ -445,6 +450,38 @@ rune/token，再乘 1.10），不是各厂商的精确 tokenizer；需要精确�
 接口、预算公式、失败路径和测试矩阵见
 [docs/context-governance.md](docs/context-governance.md)。
 
+### 委派子代理与独立上下文
+
+`orchestrator` 把“并行做一件相对独立的工作”变成内核能力，而不是让父模型自己
+开 shell 假装并行。父模型通过 `agent` 工具 `spawn` 一个任务；每个任务有独立的
+session、`contextmgr`、artifact 目录和工作区绑定工具。父上下文只收到一个有界
+最终摘要，子代理的完整转录留在自己的会话文件中。
+
+默认 `isolation=auto`：Git 仓库内创建 detached worktree，工作区外没有仓库时
+回退到 shared。worktree 从 `HEAD` 创建，**不会复制父工作区未提交的改动**；
+成功后保留，便于人工检查或合入，不会自动 merge、丢弃或删除。`worktree` 强制
+要求仓库，`shared` 是显式的不隔离模式。
+
+子代理共享父进程的扩展/权限/遥测事件总线，但事件带
+`delegation.agentId`、`delegation.parentAgentId` 和 `delegation.workspace`
+元数据；父 REPL、RPC 和 JSON 流不会把子代理事件误当成主对话。权限守卫按
+子代理工作区解析相对路径；需要交互确认但未预先配置 allow 的调用会
+fail-closed，不会抢父终端。
+
+```text
+/agents
+/agents show <id>
+/agents wait <id> [seconds]
+/agents cancel <id>
+```
+
+RPC 使用 `get_agents`、`get_agent`、`cancel_agent`。任务状态为
+`queued/running/completed/failed/cancelled/interrupted`。重启只恢复历史记录并把
+未完成任务标记为 `interrupted`，不会自动续跑未完成的运行。
+
+完整语义、隔离边界、权限规则和生命周期见
+[docs/subagents.md](docs/subagents.md)。
+
 
 ### 配置
 
@@ -470,6 +507,12 @@ rune/token，再乘 1.10），不是各厂商的精确 tokenizer；需要精确�
     "artifact_dir": ""              // 空 = <session_dir>/artifacts/<session-id>
   },
   "max_turns": 25,
+  "subagents": {                    // 委派子代理（全部可省略）
+    "max_concurrent": 4,
+    "max_depth": 3,
+    "timeout_seconds": 1800,
+    "result_bytes": 6000
+  },
   "system_prompt": "",              // 覆盖内置系统提示词
   "session_dir": "",                // 默认 ~/.harness/sessions
   "catalog_url": "",                // 远程模型目录（启动时同步）
@@ -549,6 +592,19 @@ ext.Named("my-ext", func(api *ext.API) error {
 ### 事件（hooks）一览
 
 handler 签名 `func(e *ext.Event) error`，按注册顺序同步执行；出错不中断其他 handler（错误被收集返回）。可变字段就地修改（pi 同款语义）。
+
+委派子代理的事件走同一总线，但元数据放在 `e.Data`，避免扩展核心事件结构：
+
+```go
+agentID := ext.AgentID(e)          // 空 = 主代理
+parentID := ext.ParentAgentID(e)
+workspace := ext.Workspace(e)      // 子代理工作区
+ext.SetDelegation(e, id, parent, workspace)
+```
+
+原始键是 `delegation.agentId`、`delegation.parentAgentId` 和
+`delegation.workspace`。进程扩展一样能在 `EventParams.Data` / `ConsultParams.Data`
+里看到它们。
 
 | 事件 | 时机 | 可变/可取消 |
 |------|------|------------|
@@ -774,6 +830,7 @@ anti-rollback/freshness、自动更新和回滚通道仍是后续工作。
 | `edit` | `path`, `old_string`, `new_string`, `replace_all?` | 精确字符串替换（不唯一时报错） |
 | `git` | `args[]`, `stdin?`, `workdir?`, `timeout_ms?` | 非交互执行任意 Git 子命令；参数数组直接传 Git，不经过 shell；修改型调用先建检查点 |
 | `checkpoint` | `action`, `label?`, `id?`, `limit?`, `reset_head?` | 列出/创建/恢复 Git 工作区检查点；默认同时恢复 HEAD 与 refs |
+| `agent` | `action`, `id?`, `prompt?`, `name?`, `model?`, `isolation?`, `timeout_ms?` | spawn/send/wait/status/list/cancel 隔离子代理 |
 
 工具可通过 `Registry.SetActiveTools` 控制暴露给模型的子集。
 
@@ -1060,6 +1117,9 @@ REPL 是给人用的。要把 harness 嵌进 IDE、脚本（任何语言）或�
 | `create_checkpoint` | `label?` | 手动创建一个工作区检查点 |
 | `rewind_checkpoint` | `checkpoint?`, `resetHead?`, `restoreContext?` | 恢复检查点；省略 `checkpoint` 时回退到上一个更旧状态，`resetHead` 默认 `true`；`restoreContext:true` 同时把会话移回该检查点的回合边界（与 `resetHead:false` 互斥）；运行中的 prompt 结束前拒绝恢复 |
 | `fork` / `clone` | `entryId` | 分叉会话 |
+| `get_agents` | — | 列出委派子代理任务 |
+| `get_agent` | `agentId` | 查看一个委派任务 |
+| `cancel_agent` | `agentId` | 取消任务及其后代 |
 
 **`prompt` 是异步的**：响应只说明「收下了」，答案在事件流里。客户端要等
 `agent_settled`（而不是 `agent_end`——一次运行后面可能还跟着重试）才知道跑完了。
@@ -1531,6 +1591,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 已完成的深化项：
 
+- **委派子代理与独立上下文**（[orchestrator/](orchestrator/)、[cmd/harness/subagents.go](cmd/harness/subagents.go)、[docs/subagents.md](docs/subagents.md)）：父模型用 `agent` 工具启动后台任务，每个任务拥有独立 session、上下文预算、摘要器、artifact 目录和工作区绑定工具；父上下文只收有界摘要，完整转录留在子会话。默认在 Git 仓库内创建 detached worktree，非 Git 目录回退 shared；成功 worktree 保留，需要人工检查或合入，不会自动丢弃用户改动。`max_concurrent` / `max_depth` / 单次超时 / 取消级联 / 原子 JSON 任务记录均已落地；重启将未完成任务标记为 `interrupted` 而不假装续跑。权限层按子代理 workspace 解析路径，后台无法弹父终端，未预批准的 ask 调用 fail-closed。REPL `/agents` 和 RPC `get_agents` / `get_agent` / `cancel_agent` 提供检查与控制
 - **内置 Git、逐步工作区回退与整回合撤销**（[gitkit/](gitkit/)、[docs/git-checkpoints.md](docs/git-checkpoints.md)）：Git 从“让模型跑 shell”变成内核工具。`git` 用参数数组直接执行，不经过 shell，支持 stdin、仓库内 workdir 和非交互环境；`checkpoint` 保存非忽略工作树、精确 index（含 merge 冲突 stage）、HEAD/分支/detached、普通 refs、stash 栈与 reflog。默认在每个修改型工具和用户 `!` / RPC `bash` 前自动快照，快照失败则拒绝执行；只读工具和只读 Git 子命令跳过。检查点记录所属 session、回合 ID 和会话锚点：`/rewind` 只恢复工作区，`/undo` 选择当前回合最早的快照，把工作区和会话 leaf 一起退回第一次修改之前，旧 assistant tool call 不会悬空；同一锚点下的不同分支靠回合 ID 区分，只读回合则只移动会话并明确警告。`restoreContext:true` 在 RPC 中提供同样语义，运行中的 prompt 结束前拒绝恢复与 `new_session`。恢复前先建独立 safety 检查点，所以 `/undo` 本身也能撤回，`/undo <safety-id>` 就是 redo；空选择器不会被 safety 快照带着向前跳。跨分支恢复会做 worktree 占用检查；恢复失败会尝试回滚到 safety，会话移动失败也会回滚工作区。边界明确：忽略文件、`.git/config`、hooks、`FETCH_HEAD`、非 stash reflog、submodule 工作树、未验证的 LFS 行为、进程内存、运行中的请求和工作区外副作用不在恢复范围；快照可能包含未跟踪文件里的密钥，镜像推送 `refs/harness/*` 会带走它们
 - **插件 registry、依赖解析与托管安装**（[plugins/](plugins/)、[cmd/harness/plugins_cli.go](cmd/harness/plugins_cli.go)）：插件从“手工拷贝目录”升级为可审计分发单元。registry 文档声明版本、artifact SHA-256 和依赖约束；解析器选最高兼容版本并支持回溯，安装器先把完整依赖图下载/校验/解包到 stage，再原子替换 `~/.harness/plugins/<name>`，最后写 `plugins.lock.json`。lock 记录版本、artifact digest、完整目录树 digest、来源、publisher、签名 key ID 和依赖；`-plugin-verify` 重算目录树、检查依赖版本并找出未入锁的托管插件，`-plugin-remove` 拒绝破坏仍被依赖的包。tar 解包拒绝绝对路径、目录穿越、链接、设备、重复路径和资源超限；远程 registry 仅 HTTPS（明文 HTTP 只给 loopback 开发），本地 registry 可离线使用
 - **Ed25519 registry 签名与发布者信任根**（[plugins/signing.go](plugins/signing.go)、[plugins/keys.go](plugins/keys.go)、[cmd/plugin-registry-sign/](cmd/plugin-registry-sign/)）：registry 用 `ed25519` + 公钥 SHA-256 `key_id` 声明 publisher，签名覆盖带协议域的规范化元数据、artifact URL 和 artifact 摘要，因此无法只替换下载地址或版本说明绕过认证。信任根默认是 `~/.harness/plugin_publishers.json`（可用 `HARNESS_PLUGIN_TRUST_FILE` 覆盖），只保存原始 Ed25519 公钥；`-plugin-trust` / `-plugin-untrust` / `-plugin-trust-list` 管理它。远程 registry 默认拒绝未签名文档，本地未签名 registry 仍可用于离线开发，`-plugin-allow-unsigned` 是显式且带警告的远程降级。lockfile schema 2 保存 publisher / key ID，兼容旧 schema 1；lockfile 本身不是签名账本，吊销、过期、anti-rollback/freshness 和自动更新仍未实现。签名解决发布者认证，不替代运行时沙箱或权限模型
