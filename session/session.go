@@ -62,6 +62,17 @@ type Session struct {
 
 // New creates a session with a fresh ID (timestamp-based, sortable).
 func New(dir, model string) (*Session, error) {
+	return newSession(dir, model, "", "")
+}
+
+// NewChild creates a fresh session whose header records the session
+// that delegated the work. The child starts with an empty transcript:
+// delegation is a fresh context, not a copy of the parent's history.
+func NewChild(dir, model, parentSession, name string) (*Session, error) {
+	return newSession(dir, model, parentSession, name)
+}
+
+func newSession(dir, model, parentSession, name string) (*Session, error) {
 	if dir == "" {
 		dir = DefaultDir()
 	}
@@ -70,14 +81,21 @@ func New(dir, model string) (*Session, error) {
 	}
 	id := time.Now().UTC().Format("20060102-150405.000000000")
 	s := &Session{
-		Meta: Meta{ID: id, CreatedAt: time.Now().UTC(), Model: model},
+		Meta: Meta{
+			ID:            id,
+			CreatedAt:     time.Now().UTC(),
+			Model:         model,
+			ParentSession: parentSession,
+			Name:          name,
+		},
 		Path: filepath.Join(dir, id+".jsonl"),
 	}
 	s.tree = NewTree(Header{
-		Type:      "session",
-		Version:   VersionTree,
-		ID:        id,
-		Timestamp: s.Meta.CreatedAt,
+		Type:          "session",
+		Version:       VersionTree,
+		ID:            id,
+		Timestamp:     s.Meta.CreatedAt,
+		ParentSession: parentSession,
 	})
 	if err := s.open(true); err != nil {
 		return nil, err
@@ -86,6 +104,14 @@ func New(dir, model string) (*Session, error) {
 	// knows which model it was using.
 	if model != "" {
 		e := &Entry{Type: EntryModelChange, Model: model}
+		s.tree.Append(e)
+		if err := s.writeRecord(e); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	if name != "" {
+		e := &Entry{Type: EntrySessionInfo, Name: name}
 		s.tree.Append(e)
 		if err := s.writeRecord(e); err != nil {
 			s.Close()

@@ -6,6 +6,7 @@ import (
 
 	"github.com/NanQiaoMi/auto-harness/contextmgr"
 	"github.com/NanQiaoMi/auto-harness/gitkit"
+	"github.com/NanQiaoMi/auto-harness/orchestrator"
 )
 
 // The command types the RPC mode understands.
@@ -61,6 +62,12 @@ const (
 	CmdCreateCheckpoint = "create_checkpoint"
 	// CmdRewindCheckpoint restores a workspace snapshot.
 	CmdRewindCheckpoint = "rewind_checkpoint"
+	// CmdGetAgents lists delegated background tasks.
+	CmdGetAgents = "get_agents"
+	// CmdGetAgent reports one delegated task.
+	CmdGetAgent = "get_agent"
+	// CmdCancelAgent cancels one delegated task and its descendants.
+	CmdCancelAgent = "cancel_agent"
 )
 
 // PromptCommand sends a message to the agent.
@@ -129,6 +136,23 @@ type RewindCheckpointCommand struct {
 	Checkpoint     string `json:"checkpoint,omitempty"`
 	ResetHead      *bool  `json:"resetHead,omitempty"`
 	RestoreContext bool   `json:"restoreContext,omitempty"`
+}
+
+// AgentCommand identifies one delegated task.
+type AgentCommand struct {
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type"`
+	AgentID string `json:"agentId"`
+}
+
+// AgentsPayload lists delegated tasks.
+type AgentsPayload struct {
+	Tasks []orchestrator.Task `json:"tasks"`
+}
+
+// AgentPayload reports one delegated task.
+type AgentPayload struct {
+	Task orchestrator.Task `json:"task"`
 }
 
 // The state the get_state command reports.

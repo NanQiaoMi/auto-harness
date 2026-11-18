@@ -11,6 +11,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/gitkit"
 	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/orchestrator"
 	"github.com/NanQiaoMi/auto-harness/rpc"
 	"github.com/NanQiaoMi/auto-harness/session"
 	"github.com/NanQiaoMi/auto-harness/shellext"
@@ -27,13 +28,13 @@ import (
 // The command registry is filled with the builtins, the prompt
 // templates and the skills, so a client can ask what the harness
 // knows and invoke any of it.
-func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, quiet bool) error {
+func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, subagents *orchestrator.Manager, runtime *subagentRuntime, quiet bool) error {
 	// The builtins go on the registry so get_commands reports them and
 	// a client can invoke them.
 	commandOut := newCommandOutput(os.Stderr)
 	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader,
 		mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup,
-		promptSetup, checkpointMgr, commandOut, &quiet)
+		promptSetup, checkpointMgr, subagents, commandOut, &quiet)
 	if promptSetup != nil {
 		promptSetup.install(commands, ag)
 	}
@@ -42,6 +43,13 @@ func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus
 	}
 
 	server := rpc.NewServer(ag, sess, commands, os.Stdout)
+	if runtime != nil {
+		server.OnSessionChange = func(sess *session.Session) {
+			if sess != nil {
+				runtime.parentSessionPath.set(sess.Path)
+			}
+		}
+	}
 	// The RPC server can replace the session (new_session), so resolve
 	// the binding at checkpoint time instead of capturing the startup
 	// session. User-shell snapshots belong to the current position, not
@@ -62,6 +70,24 @@ func runRPCMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus
 	}
 	server.Plugins = func() any {
 		return pluginsPayload(loader, extMgr)
+	}
+	if subagents != nil {
+		server.Agents = func() []orchestrator.Task {
+			return subagents.List("", true)
+		}
+		server.AgentTask = func(id string) (orchestrator.Task, error) {
+			task, ok := subagents.Get(id)
+			if !ok {
+				return orchestrator.Task{}, fmt.Errorf("delegated agent %q not found", id)
+			}
+			return task, nil
+		}
+		server.CancelAgent = func(ctx context.Context, id string) error {
+			if _, ok := subagents.Get(id); !ok {
+				return fmt.Errorf("delegated agent %q not found", id)
+			}
+			return subagents.Cancel(ctx, id)
+		}
 	}
 	if checkpointMgr != nil {
 		server.Checkpoints = checkpointMgr.List

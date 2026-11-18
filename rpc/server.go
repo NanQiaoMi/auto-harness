@@ -12,6 +12,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/gitkit"
 	"github.com/NanQiaoMi/auto-harness/llm"
+	"github.com/NanQiaoMi/auto-harness/orchestrator"
 	"github.com/NanQiaoMi/auto-harness/session"
 )
 
@@ -55,6 +56,15 @@ type Server struct {
 	// UndoTurn restores a workspace snapshot and the conversation turn
 	// that produced it.
 	UndoTurn func(ctx context.Context, selector string) (gitkit.TurnRewindResult, error)
+	// Agents lists delegated background tasks.
+	Agents func() []orchestrator.Task
+	// AgentTask reports one delegated task.
+	AgentTask func(id string) (orchestrator.Task, error)
+	// CancelAgent stops one delegated task and its descendants.
+	CancelAgent func(ctx context.Context, id string) error
+	// OnSessionChange observes a session switch so runtime bindings
+	// (for example delegated-session parent links) can follow it.
+	OnSessionChange func(*session.Session)
 
 	// out is the stream the records go to.
 	out io.Writer
@@ -96,6 +106,12 @@ func (s *Server) Install(bus *ext.Bus) func() {
 	for _, eventType := range s.eventTypes() {
 		t := eventType
 		unsubscribes = append(unsubscribes, bus.On(t, func(e *ext.Event) error {
+			// Delegated agents have their own transcript. Their
+			// lifecycle events must not be mistaken for the primary
+			// run's events; the agent tool reports their result.
+			if ext.AgentID(e) != "" {
+				return nil
+			}
 			s.emitEvent(e)
 			return nil
 		}))
@@ -225,9 +241,70 @@ func (s *Server) dispatch(ctx context.Context, command *Command) *Response {
 		return s.createCheckpoint(ctx, command)
 	case CmdRewindCheckpoint:
 		return s.rewindCheckpoint(ctx, command)
+	case CmdGetAgents:
+		return s.getAgents(command)
+	case CmdGetAgent:
+		return s.getAgent(command)
+	case CmdCancelAgent:
+		return s.cancelAgent(ctx, command)
 	default:
 		return Failure(command.ID, command.Type, fmt.Sprintf("Unknown command: %s", command.Type))
 	}
+}
+
+func (s *Server) getAgents(command *Command) *Response {
+	if s.Agents == nil {
+		return Success(command.ID, CmdGetAgents, AgentsPayload{Tasks: []orchestrator.Task{}})
+	}
+	tasks := s.Agents()
+	if tasks == nil {
+		tasks = []orchestrator.Task{}
+	}
+	return Success(command.ID, CmdGetAgents, AgentsPayload{Tasks: tasks})
+}
+
+func (s *Server) getAgent(command *Command) *Response {
+	var args AgentCommand
+	if err := decodeArgs(command.raw, &args); err != nil {
+		return Failure(command.ID, CmdGetAgent, err.Error())
+	}
+	if strings.TrimSpace(args.AgentID) == "" {
+		return Failure(command.ID, CmdGetAgent, "agentId is required")
+	}
+	if s.AgentTask == nil {
+		return Failure(command.ID, CmdGetAgent, "delegated agents are not configured")
+	}
+	task, err := s.AgentTask(args.AgentID)
+	if err != nil {
+		return Failure(command.ID, CmdGetAgent, err.Error())
+	}
+	return Success(command.ID, CmdGetAgent, AgentPayload{Task: task})
+}
+
+func (s *Server) cancelAgent(ctx context.Context, command *Command) *Response {
+	var args AgentCommand
+	if err := decodeArgs(command.raw, &args); err != nil {
+		return Failure(command.ID, CmdCancelAgent, err.Error())
+	}
+	if strings.TrimSpace(args.AgentID) == "" {
+		return Failure(command.ID, CmdCancelAgent, "agentId is required")
+	}
+	if s.CancelAgent == nil {
+		return Failure(command.ID, CmdCancelAgent, "delegated agents are not configured")
+	}
+	if err := s.CancelAgent(ctx, args.AgentID); err != nil {
+		return Failure(command.ID, CmdCancelAgent, err.Error())
+	}
+	state := string(orchestrator.StateCancelled)
+	if s.AgentTask != nil {
+		if task, err := s.AgentTask(args.AgentID); err == nil {
+			state = string(task.State)
+		}
+	}
+	return Success(command.ID, CmdCancelAgent, map[string]any{
+		"agentId": args.AgentID,
+		"state":   state,
+	})
 }
 
 func (s *Server) getCheckpoints(ctx context.Context, command *Command) *Response {
@@ -433,6 +510,9 @@ func (s *Server) newSession(command *Command) *Response {
 	}
 	s.Agent.Session = sess
 	s.Agent.SetHistory(nil)
+	if s.OnSessionChange != nil {
+		s.OnSessionChange(sess)
+	}
 	return Success(command.ID, CmdNewSession, NewSessionPayload{
 		SessionID:   sess.Meta.ID,
 		SessionFile: sess.Path,

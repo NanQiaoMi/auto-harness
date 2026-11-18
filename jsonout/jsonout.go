@@ -224,6 +224,12 @@ func (w *Writer) Install(bus *ext.Bus) func() {
 	for _, eventType := range w.eventTypes() {
 		t := eventType
 		unsubscribes = append(unsubscribes, bus.On(t, func(e *ext.Event) error {
+			// A delegated agent has an isolated transcript. Its report
+			// reaches the primary stream through the agent tool result,
+			// not as duplicate top-level lifecycle records.
+			if ext.AgentID(e) != "" {
+				return nil
+			}
 			w.emit(e)
 			return nil
 		}))

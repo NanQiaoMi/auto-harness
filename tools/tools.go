@@ -104,6 +104,33 @@ func NewRegistry() *Registry {
 	return &Registry{tools: map[string]*Tool{}}
 }
 
+// Clone returns an independent registry over the same immutable tool
+// definitions. The active-tool selection and renderer chain are copied,
+// so a delegated agent can replace its workspace-bound tools without
+// changing the parent agent.
+func (r *Registry) Clone() *Registry {
+	if r == nil {
+		return NewRegistry()
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	clone := &Registry{
+		tools:          make(map[string]*Tool, len(r.tools)),
+		nextRendererID: r.nextRendererID,
+	}
+	for name, tool := range r.tools {
+		clone.tools[name] = tool
+	}
+	if r.active != nil {
+		clone.active = make(map[string]bool, len(r.active))
+		for name, active := range r.active {
+			clone.active[name] = active
+		}
+	}
+	clone.renderers = append([]rendererEntry(nil), r.renderers...)
+	return clone
+}
+
 // AddRenderer adds a renderer resolver.
 //
 // The resolvers are chained in registration order, the way pi's
@@ -170,6 +197,25 @@ func (r *Registry) Register(t *Tool) error {
 	defer r.mu.Unlock()
 	if _, exists := r.tools[t.Name]; exists {
 		return fmt.Errorf("tools: tool %q already registered", t.Name)
+	}
+	r.tools[t.Name] = t
+	return nil
+}
+
+// Replace swaps an existing tool definition while preserving its place
+// in the active set. It is how a delegated agent installs tools rooted
+// at its own worktree without rebuilding extension-provided tools.
+func (r *Registry) Replace(t *Tool) error {
+	if t == nil || t.Name == "" {
+		return fmt.Errorf("tools: tool must have a name")
+	}
+	if t.Execute == nil {
+		return fmt.Errorf("tools: tool %q has no execute function", t.Name)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.tools[t.Name]; !exists {
+		return fmt.Errorf("tools: cannot replace unknown tool %q", t.Name)
 	}
 	r.tools[t.Name] = t
 	return nil

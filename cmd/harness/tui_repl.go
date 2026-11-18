@@ -84,6 +84,9 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 	// diffs it against the previous frame.
 	var streaming bool
 	bus.On(ext.EventMessageUpdate, func(e *ext.Event) error {
+		if ext.AgentID(e) != "" {
+			return nil
+		}
 		if e.Data != nil {
 			if t, _ := e.Data["thinking"].(bool); t {
 				return nil
@@ -100,6 +103,9 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 	// Each model message is committed as its own line, so two turns do
 	// not run together.
 	bus.On(ext.EventMessageEnd, func(e *ext.Event) error {
+		if ext.AgentID(e) != "" {
+			return nil
+		}
 		if pending := transcript.Pending(); pending != "" {
 			transcript.Append(pending)
 			transcript.SetPending("")

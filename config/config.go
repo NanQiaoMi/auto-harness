@@ -32,6 +32,8 @@ type Config struct {
 	Context *ContextConfig `json:"context,omitempty"`
 	// MaxTurns caps agent loop iterations (default 25).
 	MaxTurns int `json:"max_turns,omitempty"`
+	// Subagents bounds delegated background agents.
+	Subagents *SubagentConfig `json:"subagents,omitempty"`
 	// SystemPrompt replaces the built-in system prompt when non-empty.
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	// SessionDir stores session transcripts (default ~/.harness/sessions).
@@ -133,6 +135,20 @@ type ContextConfig struct {
 	// ArtifactDir stores oversized tool output. Empty uses
 	// <session_dir>/artifacts/<session-id>.
 	ArtifactDir string `json:"artifact_dir,omitempty"`
+}
+
+// SubagentConfig configures delegated agents.
+type SubagentConfig struct {
+	// MaxConcurrent is the number of child agents allowed to run at
+	// once. Default 4.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
+	// MaxDepth bounds recursive delegation. Default 3.
+	MaxDepth int `json:"max_depth,omitempty"`
+	// TimeoutSeconds bounds one child run. Default 1800.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// ResultBytes bounds the summary returned to the parent. Default
+	// 6000.
+	ResultBytes int `json:"result_bytes,omitempty"`
 }
 
 // TelemetryInterval returns how often the metrics go out.
@@ -245,6 +261,9 @@ func merge(dst *Config, src Config) {
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
+	}
+	if src.Subagents != nil {
+		dst.Subagents = src.Subagents
 	}
 	if src.SystemPrompt != "" {
 		dst.SystemPrompt = src.SystemPrompt

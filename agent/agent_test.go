@@ -134,6 +134,30 @@ func TestCheckpointerRunsOnlyBeforeMutatingTools(t *testing.T) {
 	}
 }
 
+func TestEventsCarryDelegatedAgentIdentity(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Message{{Content: "done"}}}
+	bus := ext.NewBus()
+	registry := tools.NewRegistry()
+	ag := New(Config{
+		Provider:      provider,
+		Model:         "test-model",
+		AgentID:       "sub-123",
+		ParentAgentID: "sub-100",
+	}, bus, registry)
+	var gotID, gotParent string
+	bus.On(ext.EventAgentStart, func(e *ext.Event) error {
+		gotID = ext.AgentID(e)
+		gotParent = ext.ParentAgentID(e)
+		return nil
+	})
+	if _, err := ag.Run(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if gotID != "sub-123" || gotParent != "sub-100" {
+		t.Fatalf("event identity = %q / %q", gotID, gotParent)
+	}
+}
+
 func TestCheckpointerFailureBlocksMutatingTool(t *testing.T) {
 	provider := &fakeProvider{responses: []llm.Message{
 		{ToolCalls: []llm.ToolCall{
