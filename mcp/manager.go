@@ -107,6 +107,12 @@ func (m *Manager) registerTool(server string, client *Client, t Tool) error {
 	// skipping the workspace checkpoint before a mutating call, and
 	// running a call beside its neighbors. A server that lied could
 	// mutate without a snapshot and race another call.
+	//
+	// Retryable stays false for the same reason. The agent re-sends the
+	// call with the same arguments, so retrying is only safe when the
+	// effect is idempotent, and an MCP server declares nothing about
+	// that. The transport is not the tool's contract: a call that timed
+	// out may have been applied.
 	tool := &tools.Tool{
 		Name:        name,
 		Label:       t.Title,
