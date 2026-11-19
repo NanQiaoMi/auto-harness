@@ -237,6 +237,13 @@ type Request struct {
 
 // Handler processes an event. Returning an error does not stop dispatch;
 // errors are collected and returned by Emit.
+//
+// Handlers are not necessarily called from one goroutine. Tool events
+// (tool_call, tool_execution_*, tool_result) can arrive concurrently
+// when the model asks for several read-only calls in one message, so a
+// handler that keeps state must guard it. Events that mark a boundary
+// (agent_*, turn_*, message_*, request_*, session_*) are sequential
+// with the run that emitted them.
 type Handler func(e *Event) error
 
 type subscription struct {

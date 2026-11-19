@@ -744,6 +744,11 @@ ext.SetDelegation(e, id, parent, workspace)
 标志、扩展里的计数器都加了锁；权限层一次只问一个问题——两个并行调用同时弹确认框会
 读同一个终端，第二问会把第一问的答案吃掉。
 
+写扩展时要注意：**工具事件可能是并发到来的**。一次助手消息里的连续只读调用并行执行，
+所以 `tool_call`、`tool_execution_start` / `_update` / `_end`、`tool_result` 的 handler
+可能同时在跑；带状态的 handler 要自己加锁。边界事件（`agent_*`、`turn_*`、`message_*`、
+`request_*`、`session_*`）和发出它们的 run 是串行的，不用管。
+
 ### 进程扩展（任何语言）
 
 Go 没有内置脚本解释器，所以扩展也可以是**独立的子进程**：harness 通过 stdio 上的
