@@ -190,6 +190,49 @@ func TestToolRetriesCanBeDisabled(t *testing.T) {
 	}
 }
 
+// TestToolRetryBackoffRespectsTheCap checks that a tool backoff is
+// bounded by the same ceiling as a model retry: a user who set
+// RetryMaxDelay meant it for every backoff the agent waits through.
+func TestToolRetryBackoffRespectsTheCap(t *testing.T) {
+	provider := &toolRetryProvider{calls: []llm.ToolCall{{ID: "t1", Name: "broken"}}}
+	ag, reg, bus := retryTestAgent(t, provider, 2)
+	ag.mu.Lock()
+	ag.cfg.ToolRetryDelay = time.Hour
+	ag.cfg.RetryMaxDelay = 10 * time.Millisecond
+	ag.mu.Unlock()
+	if err := reg.Register(&tools.Tool{
+		Name: "broken", Retryable: true, Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			return tools.Result{}, errors.New("down")
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var delays []int64
+	bus.On(ext.EventRetry, func(e *ext.Event) error {
+		d, _ := e.Data["delayMs"].(int64)
+		delays = append(delays, d)
+		return nil
+	})
+
+	started := time.Now()
+	if _, err := ag.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(delays) != 2 {
+		t.Fatalf("retries = %d, want 2", len(delays))
+	}
+	for _, d := range delays {
+		if d > 10 {
+			t.Errorf("backoff = %dms, want it capped at 10ms", d)
+		}
+	}
+	// The run actually waited the capped amount, not the hour.
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("the run took %s; the backoff was not capped", elapsed)
+	}
+}
+
 // TestToolRetryStopsWhenTheRunIsCancelled checks that a retrying tool
 // does not keep the user waiting for an abort.
 func TestToolRetryStopsWhenTheRunIsCancelled(t *testing.T) {

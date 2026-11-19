@@ -897,6 +897,12 @@ func (a *Agent) executeWithRetry(ctx context.Context, t *tools.Tool, call *llm.T
 	if base <= 0 {
 		base = DefaultToolRetryDelay
 	}
+	// The cap is the same one the model retries use: a user who set it
+	// meant "no single backoff longer than this".
+	ceiling := cfg.RetryMaxDelay
+	if ceiling <= 0 {
+		ceiling = DefaultRetryMaxDelay
+	}
 
 	var err error
 	for attempt := 0; ; attempt++ {
@@ -908,7 +914,7 @@ func (a *Agent) executeWithRetry(ctx context.Context, t *tools.Tool, call *llm.T
 		if !t.Retryable || attempt >= attempts || ctx.Err() != nil {
 			break
 		}
-		delay := retryDelay(base, DefaultRetryMaxDelay, attempt+1)
+		delay := retryDelay(base, ceiling, attempt+1)
 		a.emit(&ext.Event{
 			Type:   ext.EventRetry,
 			Reason: fmt.Sprintf("tool %s: %v", call.Name, err),
