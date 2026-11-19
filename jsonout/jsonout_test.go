@@ -425,6 +425,36 @@ func TestRetryRecordCarriesTheAttempt(t *testing.T) {
 	}
 }
 
+// TestToolRetryRecordNamesTheTool checks that a tool retry is
+// distinguishable from a retry of the model request: a consumer that
+// reports "the model request failed" would be wrong about a bash
+// timeout.
+func TestToolRetryRecordNamesTheTool(t *testing.T) {
+	bus := ext.NewBus()
+	var out bytes.Buffer
+	writer := NewWriter(&out)
+	writer.Install(bus)
+
+	mustEmit(t, bus, &ext.Event{
+		Type:   ext.EventRetry,
+		Reason: "tool bash: context deadline exceeded",
+		Data: map[string]any{
+			"tool":        "bash",
+			"attempt":     1,
+			"maxAttempts": 1,
+			"delayMs":     int64(500),
+		},
+	})
+
+	parsed := records(t, &out)
+	if len(parsed) != 1 {
+		t.Fatalf("the records are %v", parsed)
+	}
+	if parsed[0]["tool"] != "bash" {
+		t.Errorf("tool = %v, want bash", parsed[0]["tool"])
+	}
+}
+
 // TestSettledRecordCarriesTheAbortFlag checks that a run that was
 // stopped is distinguishable from one that finished.
 func TestSettledRecordCarriesTheAbortFlag(t *testing.T) {

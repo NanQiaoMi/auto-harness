@@ -41,6 +41,7 @@ func main() {
 		systemFlag       = flag.String("system", "", "override the system prompt")
 		maxTurns         = flag.Int("max-turns", 0, "cap on agent loop iterations (default 25)")
 		maxTokens        = flag.Int("max-tokens", 0, "cap on tokens per completion (provider default)")
+		maxRunTokens     = flag.Int("max-run-tokens", 0, "cap on tokens one run may spend, input plus output (default: no limit)")
 		sessionFlag      = flag.String("session", "", "resume session ID")
 		listSessions     = flag.Bool("list-sessions", false, "list saved sessions and exit")
 		printMode        = flag.Bool("print", false, "one-shot mode: run the given prompt and exit")
@@ -147,6 +148,9 @@ func main() {
 	}
 	if *maxTokens > 0 {
 		cfg.MaxTokens = *maxTokens
+	}
+	if *maxRunTokens > 0 {
+		cfg.MaxRunTokens = *maxRunTokens
 	}
 	if *noMCP {
 		cfg.NoMCP = true
@@ -459,6 +463,9 @@ func main() {
 		MaxRetries:     cfg.MaxRetries,
 		RetryBaseDelay: time.Duration(cfg.RetryBaseDelayMs) * time.Millisecond,
 		RetryMaxDelay:  time.Duration(cfg.RetryMaxDelayMs) * time.Millisecond,
+		ToolMaxRetries: cfg.ToolMaxRetries,
+		ToolRetryDelay: time.Duration(cfg.ToolRetryDelayMs) * time.Millisecond,
+		MaxRunTokens:   cfg.MaxRunTokens,
 		ContextBudget: func(modelID string) (int, int) {
 			if info, ok := llmReg.Model(modelID); ok {
 				return info.ContextWindow, info.MaxOutput

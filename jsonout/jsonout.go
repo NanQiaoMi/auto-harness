@@ -47,8 +47,8 @@ const (
 	// EventAgentSettled fires when the harness has no more automatic
 	// work. It is the last record of a successful run.
 	EventAgentSettled = "agent_settled"
-	// EventRetry fires when a failed model request is about to be
-	// tried again.
+	// EventRetry fires when a failed model request or tool call is
+	// about to be tried again.
 	EventRetry = "retry"
 	// EventTurnStart fires when one turn starts.
 	EventTurnStart = "turn_start"
@@ -124,6 +124,9 @@ type Record struct {
 	// Attempt is the retry number (1-based) and MaxAttempts the budget.
 	Attempt     int `json:"attempt,omitempty"`
 	MaxAttempts int `json:"maxAttempts,omitempty"`
+	// Tool names the tool a tool retry is about; empty on a retry of
+	// the model request itself.
+	Tool string `json:"tool,omitempty"`
 	// DelayMs is the backoff before the attempt.
 	DelayMs int64 `json:"delayMs,omitempty"`
 }
@@ -335,6 +338,7 @@ func (w *Writer) emit(e *ext.Event) {
 		record.Attempt, _ = e.Data["attempt"].(int)
 		record.MaxAttempts, _ = e.Data["maxAttempts"].(int)
 		record.DelayMs, _ = e.Data["delayMs"].(int64)
+		record.Tool, _ = e.Data["tool"].(string)
 	}
 
 	_ = w.write(record)

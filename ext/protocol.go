@@ -108,6 +108,10 @@ type ManifestTool struct {
 	Label       string         `json:"label,omitempty"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters,omitempty"`
+	// Retryable declares that a failed call is worth another attempt.
+	// The extension promises the call is idempotent, because the agent
+	// re-sends it with the same arguments.
+	Retryable bool `json:"retryable,omitempty"`
 }
 
 // ToolResult is the outcome of a remote tool execution.

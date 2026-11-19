@@ -51,9 +51,9 @@ const (
 	// agent_before_settle.
 	EventAgentSettled EventType = "agent_settled"
 
-	// EventRetry fires when a failed model request is about to be tried
-	// again. Reason is the error; Data carries "attempt",
-	// "maxAttempts" and "delayMs".
+	// EventRetry fires when a failed model request or tool call is about
+	// to be tried again. Reason is the error; Data carries "attempt",
+	// "maxAttempts" and "delayMs", plus "tool" for a tool retry.
 	EventRetry EventType = "retry"
 
 	// Turn lifecycle (a turn is one model completion + its tool executions)

@@ -44,6 +44,18 @@ type Tool struct {
 	// The agent skips rollback checkpoints for read-only tools. Unknown
 	// extension tools default to false for safety.
 	ReadOnly bool
+	// Retryable declares that a failed execution is worth another
+	// attempt: the tool talks to something remote, or reads something
+	// that may briefly be unavailable.
+	//
+	// Only the error return triggers a retry. A result with IsError set
+	// is the tool's answer (a command exited non-zero, a file is not
+	// there) and is returned to the model as it is.
+	//
+	// Opt in only for tools whose failure is transient and whose effect
+	// is idempotent: the agent re-runs the call with the same arguments,
+	// so a half-applied mutation would be applied twice.
+	Retryable bool
 	// Execute runs the tool. args is the raw JSON arguments object.
 	// onUpdate may be called to stream progress; it may be nil.
 	Execute func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(Update)) (Result, error)

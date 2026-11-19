@@ -127,6 +127,13 @@ func (r *subagentRuntime) factory(ctx context.Context, task orchestrator.Task) (
 		MaxTurns:      parentCfg.MaxTurns,
 		Temperature:   parentCfg.Temperature,
 		Thinking:      parentCfg.Thinking,
+		// The same tools fail the same way one level down, so the
+		// retry policy travels with them. The token budget does not:
+		// a delegated run has its own spend, and handing every child
+		// the parent's limit would multiply it by the number of
+		// children rather than bounding the tree.
+		ToolMaxRetries: parentCfg.ToolMaxRetries,
+		ToolRetryDelay: parentCfg.ToolRetryDelay,
 		ContextBudget: func(modelID string) (int, int) {
 			if info, ok := r.llmReg.Model(modelID); ok {
 				return info.ContextWindow, info.MaxOutput

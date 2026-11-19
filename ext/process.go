@@ -347,10 +347,14 @@ func (e *ProcessExtension) remoteTool(mt ManifestTool) *tools.Tool {
 		Label:       mt.Label,
 		Description: mt.Description,
 		Parameters:  mt.Parameters,
+		Retryable:   mt.Retryable,
 		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
 			conn := e.connection()
 			if conn == nil {
-				return tools.Result{Content: "extension process is not running", IsError: true}, nil
+				// A transport failure is an error, not an answer: the
+				// extension never saw the call, so a retryable tool may
+				// be tried again once the process is back.
+				return tools.Result{}, fmt.Errorf("extension process is not running")
 			}
 			var out ToolResult
 			err := conn.call(MethodToolExecute, ExecParams{
@@ -359,7 +363,7 @@ func (e *ProcessExtension) remoteTool(mt ManifestTool) *tools.Tool {
 				Arguments:  args,
 			}, &out)
 			if err != nil {
-				return tools.Result{Content: err.Error(), IsError: true}, nil
+				return tools.Result{}, err
 			}
 			return tools.Result{Content: out.Content, IsError: out.IsError}, nil
 		},

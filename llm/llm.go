@@ -65,6 +65,16 @@ func (u *Usage) Add(other Usage) {
 	u.CacheWriteTokens += other.CacheWriteTokens
 }
 
+// Total is the number of tokens billed for the requests, cached or not.
+//
+// The cache counts are included because they are tokens the provider
+// processed: a budget that ignored them would let a cached run look
+// free. They are not added to the input count, which keeps the input
+// number what the provider reported.
+func (u Usage) Total() int {
+	return u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
+}
+
 // ChatRequest is a single completion request.
 type ChatRequest struct {
 	Model       string

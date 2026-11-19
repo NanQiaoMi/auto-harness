@@ -18,7 +18,18 @@ const (
 	DefaultRetryBaseDelay = time.Second
 	// DefaultRetryMaxDelay caps one backoff delay.
 	DefaultRetryMaxDelay = 60 * time.Second
+	// DefaultToolMaxRetries is how many times a failed tool execution
+	// is retried. One retry covers a dropped connection or a momentary
+	// "resource busy" without hiding a tool that is broken.
+	DefaultToolMaxRetries = 1
+	// DefaultToolRetryDelay is the first backoff before a tool retry.
+	DefaultToolRetryDelay = 500 * time.Millisecond
 )
+
+// ErrBudgetExceeded is returned by Run when the run's token budget
+// (Config.MaxRunTokens) is spent. The history holds everything the run
+// did before the limit.
+var ErrBudgetExceeded = errors.New("agent: run token budget exceeded")
 
 // nonRetryablePattern matches errors that will fail the same way every
 // time. Retrying them only wastes the user's time and money.

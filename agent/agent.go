@@ -68,6 +68,22 @@ type Config struct {
 	RetryBaseDelay time.Duration
 	// RetryMaxDelay caps one backoff delay (default 60s).
 	RetryMaxDelay time.Duration
+	// ToolMaxRetries bounds how many times a failed execution of a tool
+	// that declares Retryable is tried again. Zero means the default
+	// (1); a negative value disables tool retries.
+	ToolMaxRetries int
+	// ToolRetryDelay is the backoff before a tool's second attempt; each
+	// further attempt doubles it (default 500ms).
+	ToolRetryDelay time.Duration
+	// MaxRunTokens bounds the tokens one run may spend (input plus
+	// output, summed over its requests). Zero means no limit.
+	//
+	// The check runs between turns, so a run overspends by at most one
+	// request: the size of the next request is only known once it is
+	// built, and building it is most of the cost. What the run did up
+	// to that point is kept in the history, and ErrBudgetExceeded is
+	// returned so the caller can say why it stopped.
+	MaxRunTokens int
 }
 
 // Checkpointer creates a rollback point before a mutating tool runs.
@@ -93,6 +109,9 @@ type Result struct {
 	Queued int
 	// Continued reports that a settle handler asked for another run.
 	Continued bool
+	// BudgetExceeded reports that the run stopped because MaxRunTokens
+	// was spent. The history up to that point is kept.
+	BudgetExceeded bool
 }
 
 // Agent runs the tool-calling loop over a conversation history,
@@ -170,6 +189,9 @@ func New(cfg Config, bus *ext.Bus, registry *tools.Registry) *Agent {
 	}
 	if cfg.RetryMaxDelay <= 0 {
 		cfg.RetryMaxDelay = DefaultRetryMaxDelay
+	}
+	if cfg.ToolRetryDelay <= 0 {
+		cfg.ToolRetryDelay = DefaultToolRetryDelay
 	}
 	return &Agent{cfg: cfg, Bus: bus, Tools: registry}
 }
@@ -455,6 +477,14 @@ func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			// The budget is checked before a turn, so a run that already
+			// spent its allowance does not start a request it cannot
+			// afford.
+			if budget := a.Config().MaxRunTokens; budget > 0 && res.Usage.Total() >= budget {
+				res.BudgetExceeded = true
+				return fmt.Errorf("%w (spent %d of %d tokens over %d turns)",
+					ErrBudgetExceeded, res.Usage.Total(), budget, res.Turns)
+			}
 			res.Turns++
 			a.emit(&ext.Event{Type: ext.EventTurnStart})
 
@@ -513,7 +543,9 @@ func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
 		a.emit(&ext.Event{Type: ext.EventAgentEnd, Usage: res.Usage})
 		if runErr != nil {
 			// An aborted run has no settle boundary to offer: it goes
-			// straight to the notification.
+			// straight to the notification. A run stopped by its budget
+			// is not aborted — the user did not cancel it — so a status
+			// integration can tell the two apart.
 			a.emit(&ext.Event{Type: ext.EventAgentSettled, Aborted: ctx.Err() != nil})
 			return res, runErr
 		}
@@ -847,6 +879,53 @@ func (a *Agent) contextLimits(cfg Config) (window, maxOut int) {
 	return window, maxOut
 }
 
+// executeWithRetry runs a tool, trying again when it failed with an
+// error and declared itself retryable.
+//
+// The retry is bounded and backed off, and it stops when the run is
+// cancelled: a tool that is retried while the user is pressing Ctrl+C
+// only delays the abort. Only the error return is retried — a Result
+// with IsError set is the tool's answer, and re-running it would be
+// second-guessing the tool rather than repairing a transient failure.
+func (a *Agent) executeWithRetry(ctx context.Context, t *tools.Tool, call *llm.ToolCall, onUpdate func(tools.Update)) tools.Result {
+	cfg := a.Config()
+	attempts := cfg.ToolMaxRetries
+	if attempts == 0 {
+		attempts = DefaultToolMaxRetries
+	}
+	base := cfg.ToolRetryDelay
+	if base <= 0 {
+		base = DefaultToolRetryDelay
+	}
+
+	var err error
+	for attempt := 0; ; attempt++ {
+		var result tools.Result
+		result, err = t.Execute(ctx, call.ID, call.Arguments, onUpdate)
+		if err == nil {
+			return result
+		}
+		if !t.Retryable || attempt >= attempts || ctx.Err() != nil {
+			break
+		}
+		delay := retryDelay(base, DefaultRetryMaxDelay, attempt+1)
+		a.emit(&ext.Event{
+			Type:   ext.EventRetry,
+			Reason: fmt.Sprintf("tool %s: %v", call.Name, err),
+			Data: map[string]any{
+				"tool":        call.Name,
+				"attempt":     attempt + 1,
+				"maxAttempts": attempts,
+				"delayMs":     delay.Milliseconds(),
+			},
+		})
+		if !sleepCtx(ctx, delay) {
+			break
+		}
+	}
+	return tools.Result{Content: fmt.Sprintf("tool %s failed: %v", call.Name, err), IsError: true}
+}
+
 // executeTool runs one tool call and returns the tool-result message.
 func (a *Agent) executeTool(ctx context.Context, call *llm.ToolCall) llm.Message {
 	a.emit(&ext.Event{Type: ext.EventToolExecutionStart, ToolCall: call})
@@ -899,12 +978,7 @@ func (a *Agent) executeTool(ctx context.Context, call *llm.ToolCall) llm.Message
 			}
 		}
 		if allowed {
-			execResult, err := t.Execute(ctx, call.ID, call.Arguments, onUpdate)
-			if err != nil {
-				result = tools.Result{Content: fmt.Sprintf("tool %s failed: %v", call.Name, err), IsError: true}
-			} else {
-				result = execResult
-			}
+			result = a.executeWithRetry(ctx, t, call, onUpdate)
 		}
 	}
 

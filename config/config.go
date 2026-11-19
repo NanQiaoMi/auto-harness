@@ -40,6 +40,16 @@ type Config struct {
 	RetryBaseDelayMs int `json:"retry_base_delay_ms,omitempty"`
 	// RetryMaxDelayMs caps one backoff delay (default 60000).
 	RetryMaxDelayMs int `json:"retry_max_delay_ms,omitempty"`
+	// ToolMaxRetries bounds how often a failed execution of a retryable
+	// tool is tried again (default 1). A negative value disables tool
+	// retries.
+	ToolMaxRetries int `json:"tool_max_retries,omitempty"`
+	// ToolRetryDelayMs is the first backoff before a tool retry
+	// (default 500).
+	ToolRetryDelayMs int `json:"tool_retry_delay_ms,omitempty"`
+	// MaxRunTokens bounds the tokens one run may spend. Zero means no
+	// limit.
+	MaxRunTokens int `json:"max_run_tokens,omitempty"`
 	// Subagents bounds delegated background agents.
 	Subagents *SubagentConfig `json:"subagents,omitempty"`
 	// SystemPrompt replaces the built-in system prompt when non-empty.
@@ -278,6 +288,15 @@ func merge(dst *Config, src Config) {
 	}
 	if src.RetryMaxDelayMs > 0 {
 		dst.RetryMaxDelayMs = src.RetryMaxDelayMs
+	}
+	if src.ToolMaxRetries != 0 {
+		dst.ToolMaxRetries = src.ToolMaxRetries
+	}
+	if src.ToolRetryDelayMs > 0 {
+		dst.ToolRetryDelayMs = src.ToolRetryDelayMs
+	}
+	if src.MaxRunTokens > 0 {
+		dst.MaxRunTokens = src.MaxRunTokens
 	}
 	if src.Subagents != nil {
 		dst.Subagents = src.Subagents
