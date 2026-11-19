@@ -89,6 +89,21 @@ type Config struct {
 	SandboxWritePaths []string `json:"sandbox_write_paths,omitempty"`
 	// SandboxAllowNetwork permits network access in the sandbox.
 	SandboxAllowNetwork bool `json:"sandbox_allow_network,omitempty"`
+	// SandboxPlugins confines plugin child processes with the same
+	// operating-system sandbox the bash tool uses.
+	//
+	// It is off by default because it is a compatibility break, not a
+	// hardening default: a plugin that writes outside its own directory
+	// or talks to the network stops working. The capability list is not
+	// a substitute — it limits the protocol surfaces, not the process.
+	SandboxPlugins bool `json:"sandbox_plugins,omitempty"`
+	// SandboxPluginsRequire refuses to load a plugin on a platform with
+	// no sandbox, rather than running it unconfined.
+	SandboxPluginsRequire bool `json:"sandbox_plugins_require,omitempty"`
+	// SandboxPluginsNetwork lets a sandboxed plugin reach the network.
+	// It is separate from SandboxAllowNetwork because a plugin usually
+	// wants network access the shell does not.
+	SandboxPluginsNetwork bool `json:"sandbox_plugins_network,omitempty"`
 	// NoPermissions disables the permission layer.
 	NoPermissions bool `json:"no_permissions,omitempty"`
 	// Providers configures additional provider endpoints, enabling
@@ -336,6 +351,15 @@ func merge(dst *Config, src Config) {
 	}
 	if src.SandboxAllowNetwork {
 		dst.SandboxAllowNetwork = true
+	}
+	if src.SandboxPlugins {
+		dst.SandboxPlugins = true
+	}
+	if src.SandboxPluginsRequire {
+		dst.SandboxPluginsRequire = true
+	}
+	if src.SandboxPluginsNetwork {
+		dst.SandboxPluginsNetwork = true
 	}
 	if src.NoPermissions {
 		dst.NoPermissions = true

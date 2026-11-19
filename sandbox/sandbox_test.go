@@ -176,6 +176,52 @@ func TestSandboxBlocksNetwork(t *testing.T) {
 	}
 }
 
+// TestCommandConfinesAProcess checks the entry point the extension
+// runtime uses: it must return a confined command when a profile is
+// given, and an unconfined one when it is not.
+func TestCommandConfinesAProcess(t *testing.T) {
+	dir := t.TempDir()
+	profile := Profile{WritePaths: []string{dir}, AllowNetwork: true}
+
+	cmd, sandboxed, err := Command(context.Background(), "/bin/echo", []string{"hi"}, &profile, dir)
+	if err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	if sandboxed != Available() {
+		t.Errorf("sandboxed = %v, want %v", sandboxed, Available())
+	}
+	if cmd.Dir != dir {
+		t.Errorf("dir = %q, want %q", cmd.Dir, dir)
+	}
+	if Available() {
+		// The wrapper is sandbox-exec, with the original argv after the
+		// policy.
+		if !strings.HasSuffix(cmd.Path, "sandbox-exec") {
+			t.Errorf("path = %q, want sandbox-exec", cmd.Path)
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if strings.TrimSpace(string(out)) != "hi" {
+			t.Errorf("output = %q", out)
+		}
+	}
+
+	// No profile means no confinement: a caller that wants a plain
+	// child must not get one silently wrapped.
+	plain, sandboxed, err := Command(context.Background(), "/bin/echo", []string{"hi"}, nil, dir)
+	if err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	if sandboxed {
+		t.Error("a nil profile produced a sandboxed command")
+	}
+	if strings.HasSuffix(plain.Path, "sandbox-exec") {
+		t.Errorf("path = %q, want the command itself", plain.Path)
+	}
+}
+
 // TestPolicyOrderIsCorrect verifies the generated policy denies before
 // it allows, since Seatbelt uses the last matching rule.
 func TestPolicyOrderIsCorrect(t *testing.T) {

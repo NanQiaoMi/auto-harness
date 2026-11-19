@@ -2,9 +2,12 @@ package ext
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"reflect"
 	"time"
+
+	"github.com/NanQiaoMi/auto-harness/sandbox"
 )
 
 // RestartMode controls whether a process extension is restarted after
@@ -134,9 +137,17 @@ func (e *ProcessExtension) startProcess(api *API) (*processRun, Manifest, error)
 	if ctx == nil {
 		return nil, Manifest{}, fmt.Errorf("ext: %s: process context is not initialized", e.Command)
 	}
-	cmd := exec.CommandContext(ctx, e.Command, e.Args...)
-	if e.Dir != "" {
-		cmd.Dir = e.Dir
+	cmd, sandboxed, err := sandbox.Command(ctx, e.Command, e.Args, e.sandboxProfile(), e.Dir)
+	if err != nil {
+		return nil, Manifest{}, fmt.Errorf("ext: %s: sandbox: %w", e.Command, err)
+	}
+	if e.Sandbox != nil && !sandboxed {
+		if e.RequireSandbox {
+			return nil, Manifest{}, fmt.Errorf(
+				"ext: %s: a sandbox was required but this platform has none", e.Command)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[warn] ext: %s: no sandbox on this platform; the extension runs unconfined\n", e.Command)
 	}
 	if len(e.Env) > 0 {
 		cmd.Env = append(cmd.Environ(), e.Env...)

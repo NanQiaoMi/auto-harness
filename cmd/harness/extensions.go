@@ -12,6 +12,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/config"
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/plugins"
+	"github.com/NanQiaoMi/auto-harness/sandbox"
 )
 
 // loadExtensionSet loads every extension independently. One broken
@@ -50,6 +51,14 @@ type extensionLoader struct {
 	pluginFilter map[string]bool
 	// pluginEnv is inherited by plugin child processes.
 	pluginEnv map[string]string
+	// sandboxPlugins confines every plugin child process with the
+	// operating-system sandbox.
+	sandboxPlugins bool
+	// requireSandbox refuses to load a plugin when the platform has no
+	// sandbox, instead of running it unconfined.
+	requireSandbox bool
+	// sandboxNetwork lets a sandboxed plugin reach the network.
+	sandboxNetwork bool
 	// pluginRecords is the discovery/launch state for /plugins.
 	pluginRecords []pluginRecord
 	// selectedPlugins tracks profile-selected names that were found.
@@ -179,7 +188,9 @@ func (l *extensionLoader) build() []ext.Extension {
 	if cmd := strings.TrimSpace(l.cfg.ExtensionCommand); cmd != "" {
 		fields := strings.Fields(cmd)
 		if len(fields) > 0 {
-			exts = append(exts, ext.NewProcessExtension(fields[0], fields[1:]...))
+			pe := ext.NewProcessExtension(fields[0], fields[1:]...)
+			l.confine(pe)
+			exts = append(exts, pe)
 		}
 	}
 
@@ -188,6 +199,19 @@ func (l *extensionLoader) build() []ext.Extension {
 	l.selectedPlugins = map[string]bool{}
 	l.missingPlugins = nil
 	return append(exts, l.processExtensions(l.extensionDirs())...)
+}
+
+// confine applies the plugin sandbox policy to a process extension.
+//
+// Every process extension goes through here, including the single
+// extension_command one: a sandbox the user asked for that covers only
+// some plugins is worse than none, because it reads like coverage.
+func (l *extensionLoader) confine(pe *ext.ProcessExtension) {
+	if !l.sandboxPlugins || pe == nil {
+		return
+	}
+	pe.Sandbox = &sandbox.Profile{AllowNetwork: l.sandboxNetwork}
+	pe.RequireSandbox = l.requireSandbox
 }
 
 // processExtensions discovers and wraps process plugins from dirs.
@@ -218,6 +242,7 @@ func (l *extensionLoader) processExtensions(dirs []string) []ext.Extension {
 			l.diagnostics = append(l.diagnostics, err)
 			fmt.Fprintf(os.Stderr, "[warn] %v\n", err)
 		} else {
+			l.confine(extension)
 			exts = append(exts, extension)
 		}
 		l.pluginRecords = append(l.pluginRecords, record)
@@ -331,6 +356,13 @@ func (l *extensionLoader) report(manager *ext.Manager) {
 			record.Candidate.Name(), version, state, record.Candidate.Path)
 		if record.Err != nil {
 			fmt.Printf("  error: %v\n", record.Err)
+		}
+		if record.Extension != nil && record.Extension.Sandboxed() {
+			if sandbox.Available() {
+				fmt.Printf("  sandbox: %s\n", record.Extension.SandboxProfile().Describe())
+			} else {
+				fmt.Println("  sandbox: requested, but this platform has none")
+			}
 		}
 		if status.Mode != "" {
 			fmt.Printf("  supervisor: %s, restarts %d/%d\n",

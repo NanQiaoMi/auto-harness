@@ -46,14 +46,18 @@ type Profile struct {
 func DefaultProfile(workdir string) Profile {
 	return Profile{
 		WritePaths:    []string{workdir},
-		DenyReadPaths: defaultDenyReadPaths(),
+		DenyReadPaths: DefaultDenyReadPaths(),
 		AllowNetwork:  true,
 	}
 }
 
-// defaultDenyReadPaths lists the credential and key locations that a
-// generated command should not be able to read.
-func defaultDenyReadPaths() []string {
+// DefaultDenyReadPaths lists the credential and key locations that
+// generated code should not be able to read.
+//
+// It is exported because a caller confining something other than a
+// shell command — an extension process, say — wants the same list
+// rather than a second, subtly different one.
+func DefaultDenyReadPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
@@ -100,6 +104,34 @@ func Exec(ctx context.Context, command string, profile Profile, workdir string) 
 	}
 	out, err := outputOf(ctx, cmd)
 	return string(out), true, err
+}
+
+// Command builds an exec.Cmd that runs name with args inside the
+// sandbox, and reports whether it is actually confined.
+//
+// It exists for the callers that need the process's own streams rather
+// than its output: the extension runtime talks JSON-RPC over the
+// child's stdin and stdout, so it builds the command itself. The
+// returned command has Dir set; the caller may still set Env and take
+// pipes.
+//
+// On a platform without sandbox support the command runs unchanged and
+// sandboxed is false. A caller that was asked to confine something must
+// treat that as a failure rather than quietly running it unconfined.
+func Command(ctx context.Context, name string, args []string, profile *Profile, workdir string) (*exec.Cmd, bool, error) {
+	if profile == nil || !Available() {
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.Dir = workdir
+		return cmd, false, nil
+	}
+	policy, err := policyFor(*profile)
+	if err != nil {
+		return nil, false, err
+	}
+	argv := append([]string{"-p", policy, name}, args...)
+	cmd := exec.CommandContext(ctx, "sandbox-exec", argv...)
+	cmd.Dir = workdir
+	return cmd, true, nil
 }
 
 // runCommand runs a command without sandboxing.

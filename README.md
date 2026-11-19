@@ -310,6 +310,9 @@ export OPENAI_API_KEY=oc_sk-...
 # 委派子代理（默认启用；-no-subagents 关闭 agent 工具和后台任务）
 ./bin/harness -no-subagents
 
+# 把插件子进程关进系统沙箱（macOS Seatbelt；默认关）
+./bin/harness -sandbox-plugins
+
 # RPC 模式：stdin 收 JSON 命令，stdout 吐 JSON 记录，被别的程序驱动
 ./bin/harness -rpc
 
@@ -644,6 +647,9 @@ Ctrl+C 之后不该再有扩展把活接着干下去。
   "sandbox": true,                  // macOS Seatbelt 限制 shell 执行
   "sandbox_write_paths": [],        // 写白名单，默认工作目录
   "sandbox_allow_network": false,   // 沙箱内是否允许网络
+  "sandbox_plugins": false,         // 同样关住插件子进程（默认关，会改变插件行为）
+  "sandbox_plugins_network": false, // 沙箱内插件是否允许网络（与上面分开）
+  "sandbox_plugins_require": false, // 平台没有沙箱时拒绝加载插件，而不是警告后照跑
   "telemetry": false,               // 打开遥测采集（默认关）
   "telemetry_path": "",             // JSONL 输出路径，默认 ~/.harness/telemetry.jsonl
   "telemetry_endpoint": "",         // OTLP/HTTP collector，如 http://localhost:4318/v1/traces
@@ -830,6 +836,16 @@ harness 会把这条声明搬到注册出来的工具上，agent 于是会退避
 决定：`tools`（提供工具）、`commands`（提供斜杠命令）、`hooks`（被 consult 询问）、
 `events`（推送事件）。没声明的能力被拒绝而不是静默忽略——一个 manifest 提供了工具却
 没拿到 `tools` 授权，加载直接失败。
+
+能力不等于隔离。`capabilities` 限制的是扩展在协议里能碰哪些面，不是进程能碰什么：
+只拿到 `tools` 的插件仍然是同一个用户、同一套文件权限，照样读得到你的 SSH 私钥。
+要挡住这件事得靠内核，所以 `sandbox_plugins`（或 `-sandbox-plugins`）把插件子进程放
+进和 bash 工具同一套系统沙箱：插件自己的目录可写，`~/.ssh` 之类的凭据目录不可读，
+网络默认禁止（`sandbox_plugins_network` 单独打开——一个插件要访问 URL 和一条 shell
+命令要 curl 不是同一个风险）。`sandbox_plugins_require` 把「这个平台没有沙箱」变成
+加载失败而不是警告后照跑：用户要求隔离的时候，不隔离地跑起来等于 harness 在撒谎。
+今天只有 macOS 有沙箱；`/plugins` 会显示每个被沙箱插件的实际 profile。这是进程边界，
+不是容器，也不是按插件区分的策略——它是整次运行的开关。
 
 #### 反向通道：harness 问扩展
 
@@ -1785,6 +1801,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 已完成的深化项：
 
+- **插件进程沙箱**（[sandbox/sandbox.go](sandbox/sandbox.go)、[ext/supervisor.go](ext/supervisor.go)、[ext/process.go](ext/process.go)）：能力声明管的是协议表面，管不了进程——一个只拿到 `tools` 的插件仍然以同一个用户身份跑，读得到 harness 读得到的一切。`sandbox_plugins` / `-sandbox-plugins` 把插件子进程放进和 bash 工具同一套 Seatbelt 策略：插件目录可写、凭据目录不可读、网络默认拒绝（`sandbox_plugins_network` 单独打开，因为插件要联网和 shell 要 curl 是两种风险）。`sandbox_plugins_require` 让「平台没有沙箱」变成加载失败而不是警告后照跑。`sandbox.Command` 是这一层的入口：它返回一个把任意 argv 包进 `sandbox-exec` 的 `exec.Cmd`，所以需要自己接管 stdin/stdout 的调用方（JSON-RPC 扩展就是）也能用同一套策略。`/plugins` 显示每个被沙箱插件的实际 profile
 - **工具级重试与运行级预算闸门**（[agent/agent.go](agent/agent.go)、[agent/retry.go](agent/retry.go)、[tools/tools.go](tools/tools.go)）：重试从「只针对模型请求」扩到工具调用。工具用 `Retryable` 声明失败是暂时的、调用幂等，agent 用同一套退避（`base * 2^(attempt-1)`，默认 500ms 起、`tool_max_retries` 默认 1、负数关闭）重跑这次调用，省掉模型自己再发一遍的往返。边界是**只有 `error` 返回才重试**：`Result{IsError:true}` 是工具的答案（命令退出码非零、文件不存在），重跑只会得到同一句话，模型该看到的是它而不是一次重试。进程扩展的 `tool.execute` 传输失败返回 `error`，所以子进程重启后能再试；manifest 的 `"retryable": true` 会搬到注册的工具上。重试前发 `retry` 事件（`e.Data["tool"]` 指明工具），运行被中止时退避立即中断。**预算闸门**给一次运行一个 token 上限：`max_run_tokens` / `-max-run-tokens`，计数是 `input + output + cacheRead + cacheWrite`（缓存命中的 token 也是 provider 处理过的，漏算会让高缓存命中率的运行看起来免费）；检查在每轮之间，所以最多超支一个请求——下一个请求多大只有构造出来才知道。到点后历史保留、`Result.BudgetExceeded` 置位、返回 `ErrBudgetExceeded`，`agent_settled{aborted:false}` 照常发出：按预算停下不是用户中止
 - **可替换的内核层与并行工具调用**（[ext/ext.go](ext/ext.go)、[llm/registry.go](llm/registry.go)、[agent/agent.go](agent/agent.go)）：从「扩展能加东西」走到「扩展能换掉内核的一层」。`api.RegisterProtocol` + `api.RegisterModel` 让一种内核不认识的线上协议像内置的一样路由——注册协议名和 builder，模型声明该协议，`/model` 切过去就由扩展服务；`api.UseContextPolicy` 把内核的预算/自动压缩/artifact 外置变成最内层，扩展注册的策略包在它外面，可以改写输入、改结果或整个接管（不调 `next` 就是不压缩），多策略按注册顺序从外到内，热重载撤销注册所以 `/reload` 不会叠两层；进程扩展补上 `commands` 能力和 `command.execute` 方法，任何语言的插件都能提供斜杠命令，不再只有 Go 扩展可以。工具循环也补了并行：一次助手消息里**连续的只读调用**并行执行（上限 4），有副作用的调用保持串行且顺序不变（写和它后面的读必须看到写的效果），结果按调用顺序而不是完成顺序回填。只读由工具的 `ReadOnly` 声明决定，未知工具按有副作用处理；并行也让工具通知、TUI 流式标志和示例扩展的计数器变成多 goroutine 共享，三处都加了锁，权限层则改成一次只问一个问题。委托出去的子代理沿用父代理的上下文策略——否则一条注入项目规则或替换压缩的策略会在一层之下悄悄失效
 - **委派子代理与独立上下文**（[orchestrator/](orchestrator/)、[cmd/harness/subagents.go](cmd/harness/subagents.go)、[docs/subagents.md](docs/subagents.md)）：父模型用 `agent` 工具启动后台任务，每个任务拥有独立 session、上下文预算、摘要器、artifact 目录和工作区绑定工具；父上下文只收有界摘要，完整转录留在子会话。默认在 Git 仓库内创建 detached worktree，非 Git 目录回退 shared；成功 worktree 保留，需要人工检查或合入，不会自动丢弃用户改动。`max_concurrent` / `max_depth` / 单次超时 / 取消级联 / 原子 JSON 任务记录均已落地；重启将未完成任务标记为 `interrupted` 而不假装续跑。权限层按子代理 workspace 解析路径，后台无法弹父终端，未预批准的 ask 调用 fail-closed。REPL `/agents` 和 RPC `get_agents` / `get_agent` / `cancel_agent` 提供检查与控制
@@ -1820,7 +1837,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 尚未做的深化项（按优先级）：
 
-- **真正的隔离**：进程扩展目前靠能力声明和 fail-closed 的 gate 约束，不是沙箱——子进程和 harness 同一个用户、同一套文件权限，能读到的东西一样多。WASM 插件或按插件降权的子进程是下一步。这一项不是接口化能解决的：上面那三层可替换的内核层要的是 Go 值，跨进程的扩展拿不到，隔离要的是另一件事——限制子进程本身。
+- **真正的隔离（后续）**：`sandbox_plugins` 已经把插件子进程关进 macOS Seatbelt，但那是进程边界不是容器，也不按插件区分策略。下一步是 Linux（landlock / seccomp）、按插件声明自己的 profile，以及 WASM 插件这类真正换掉执行环境的路子。上面那三层可替换的内核层要的是 Go 值，跨进程的扩展拿不到，所以隔离只能靠限制子进程本身，而不是接口化。
 - **多模态输入**：`llm.Message` 目前只有文本，图片输入（pi 的 `input: ["text","image"]`）没有落地。
 - **事件 schema 版本化与 SDK**：事件形状写在 `ext/ext.go` 和 README 里，没有版本号也没有别的语言的客户端库——RPC 客户端目前只能照文档手写。
 

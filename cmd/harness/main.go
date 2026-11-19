@@ -67,6 +67,7 @@ func main() {
 		noGitCheckpoints = flag.Bool("no-git-checkpoints", false, "disable automatic workspace checkpoints")
 		checkpointLimit  = flag.Int("checkpoint-limit", gitkit.DefaultCheckpointLimit, "maximum retained workspace checkpoints")
 		noSubagents      = flag.Bool("no-subagents", false, "disable delegated background agents")
+		sandboxPlugins   = flag.Bool("sandbox-plugins", false, "confine plugin child processes with the OS sandbox")
 	)
 	flag.Parse()
 
@@ -154,6 +155,9 @@ func main() {
 	}
 	if *noMCP {
 		cfg.NoMCP = true
+	}
+	if *sandboxPlugins {
+		cfg.SandboxPlugins = true
 	}
 	cfg.ResolveProviderEnvironment()
 
@@ -293,7 +297,13 @@ func main() {
 		extMgr.Shutdown()
 		_ = sess.Close()
 	}
-	loader := &extensionLoader{projectRoot: workdir(), cfg: cfg}
+	loader := &extensionLoader{
+		projectRoot:    workdir(),
+		cfg:            cfg,
+		sandboxPlugins: cfg.SandboxPlugins,
+		requireSandbox: cfg.SandboxPluginsRequire,
+		sandboxNetwork: cfg.SandboxPluginsNetwork,
+	}
 	loader.configure(profileSetup.profile(), profileSetup.fromProject())
 	if err := loadExtensionSet(extMgr, loader.build()); err != nil {
 		// A broken extension must not stop the harness from starting.

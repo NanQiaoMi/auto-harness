@@ -205,6 +205,12 @@ Rules:
   `backoff_ms` and `max_backoff_ms` must be between 0 and 60000, and
   the initial backoff cannot exceed the maximum.
 
+`capabilities` is not confinement. It decides which protocol surfaces
+the extension may use inside the harness; it says nothing about what the
+process can touch. A plugin granted only `tools` still runs as the same
+user with the same file permissions, so it can read the SSH keys the
+harness can read. For that, use the process sandbox below.
+
 Available expansion names in a plugin manifest:
 
 ```text
@@ -225,6 +231,44 @@ Legacy plugins remain supported. An executable directly in
 `extension_dirs` entry, or directly inside a manifest-free subdirectory
 is still launched as before. A manifest plugin is one candidate even
 when its directory contains helper executables.
+
+### Confining a plugin process
+
+`sandbox_plugins` in `config.json` (or `-sandbox-plugins`) puts every
+plugin child process inside the same operating-system sandbox the bash
+tool can use — on macOS, Seatbelt through `sandbox-exec`. The kernel,
+not the harness, is then what stops the child from reading a denied
+path.
+
+```json
+{
+  "sandbox_plugins": true,
+  "sandbox_plugins_network": false,
+  "sandbox_plugins_require": true
+}
+```
+
+- The plugin's own directory is writable and the usual credential
+  locations (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.kube`,
+  `~/.docker`) are not readable. Everything else is readable, because a
+  process cannot start when it may not read the system libraries.
+- `sandbox_plugins_network` is separate from `sandbox_allow_network`
+  on purpose: a plugin that fetches a URL and a shell command that
+  curls are different risks, and the default is denial for both.
+- `sandbox_plugins_require` turns "this platform has no sandbox" into a
+  load error instead of a warning and an unconfined child. Without it
+  the harness prints a warning and loads the plugin anyway; set it when
+  the confinement is the reason the plugin is trusted.
+- Only `darwin` has a sandbox today. On Linux the options are a warning
+  or, with `sandbox_plugins_require`, a refusal — there is no
+  "probably fine" middle ground, and running a plugin the user asked to
+  confine without confining it would be the harness lying about what it
+  did.
+- `/plugins` shows the profile in effect for each sandboxed plugin.
+
+This is confinement of the process, not a permission layer for what it
+does inside the protocol: capabilities still decide that, and the
+sandbox cannot tell a well-behaved plugin from a hostile one.
 
 ### Supervised process lifecycle
 
@@ -490,11 +534,15 @@ instead of half-loading the new one.
 ## Deliberate boundaries
 
 This layer now provides registry-based installation, Ed25519 publisher
-authentication, dependency resolution and tree verification. It does
-not yet provide key revocation/expiry, registry anti-rollback or
-freshness policy, automatic updates, rollback channels, a registry UI,
-per-profile sandbox policy, multi-tenant quotas or task
-checkpoint/resume. Workspace checkpoints restore Git state (worktree,
+authentication, dependency resolution, tree verification and an
+optional operating-system sandbox for plugin processes. It does not yet
+provide key revocation/expiry, registry anti-rollback or freshness
+policy, automatic updates, rollback channels, a registry UI,
+per-profile sandbox policy (the sandbox is per-run, not per-plugin),
+multi-tenant quotas or task checkpoint/resume. The plugin sandbox is
+macOS-only, and it is a process boundary, not a container: the child is
+still the same user, and it can still reach anything the profile
+declares readable. Workspace checkpoints restore Git state (worktree,
 index, HEAD/refs and stash). The turn-level `/undo` (RPC
 `restoreContext:true`) additionally restores the workspace to the
 oldest snapshot of the current turn and moves the session branch to its

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NanQiaoMi/auto-harness/sandbox"
 	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
@@ -59,6 +60,19 @@ type ProcessExtension struct {
 	// exits. The zero value preserves the historical no-restart
 	// behavior.
 	RestartPolicy RestartPolicy
+	// Sandbox confines the child process with the operating-system
+	// sandbox. nil runs the child with the harness's own access.
+	//
+	// This is confinement, not a capability check: a capability decides
+	// which surfaces the extension may use inside the protocol, while
+	// the sandbox decides what the process can touch once it runs. An
+	// extension that is otherwise well behaved can still read the
+	// user's SSH keys, and only the kernel can stop that.
+	Sandbox *sandbox.Profile
+	// RequireSandbox turns "this platform has no sandbox" into a load
+	// error instead of running the child unconfined. It is the honest
+	// setting for anything the user asked to be confined.
+	RequireSandbox bool
 
 	mu     sync.Mutex
 	run    *processRun
@@ -433,6 +447,43 @@ func (e *ProcessExtension) allows(capability string) bool {
 		}
 	}
 	return false
+}
+
+// Sandboxed reports whether this extension asked to be confined.
+//
+// It says what was configured, not whether the platform can honour it;
+// startProcess reports the second.
+func (e *ProcessExtension) Sandboxed() bool {
+	return e.Sandbox != nil
+}
+
+// SandboxProfile returns the profile the child is confined with, with
+// the defaults filled in, or nil when it runs unconfined.
+func (e *ProcessExtension) SandboxProfile() *sandbox.Profile {
+	return e.sandboxProfile()
+}
+
+// sandboxProfile returns the profile to confine the child with, or nil
+// when it runs unconfined.
+//
+// A profile with no write path would deny every write, which is not what
+// "confine this extension" should mean: the child needs its own
+// directory to be writable, or it cannot even load its own code. So a
+// configured profile that names no writable directory gets the plugin
+// directory, and one that names none at all gets the default credential
+// denials.
+func (e *ProcessExtension) sandboxProfile() *sandbox.Profile {
+	if e.Sandbox == nil {
+		return nil
+	}
+	p := *e.Sandbox
+	if len(p.DenyReadPaths) == 0 {
+		p.DenyReadPaths = sandbox.DefaultDenyReadPaths()
+	}
+	if len(p.WritePaths) == 0 && e.Dir != "" {
+		p.WritePaths = []string{e.Dir}
+	}
+	return &p
 }
 
 // connection returns the live connection, if any.
