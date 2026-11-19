@@ -90,6 +90,11 @@ var retryablePattern = regexp.MustCompile(`(?i)` + strings.Join([]string{
 	"ended without",
 	"stream ended before",
 	"unexpected EOF",
+	// A bare EOF is the connection closing before a response arrived
+	// (net/http reports it as `Post "…": EOF`). The normal end of a
+	// stream never reaches the classifier: streamOnce treats io.EOF as
+	// success.
+	`\bEOF\b`,
 	"http2",
 	"try your request again",
 	"please retry",

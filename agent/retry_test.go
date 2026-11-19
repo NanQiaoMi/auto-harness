@@ -24,6 +24,10 @@ func TestIsRetryableClassifiesFailures(t *testing.T) {
 		{"provider returned 503 service unavailable", true},
 		{"connection reset by peer", true},
 		{"unexpected EOF", true},
+		// A bare EOF is a connection closed before the response: it is
+		// what net/http reports for a dropped POST.
+		{`Post "https://gw.test/v1/chat/completions": EOF`, true},
+		{"EOF", true},
 		{"stream was interrupted", true},
 		{"ECONNRESET", true},
 		// Permanent: the same call fails the same way.
