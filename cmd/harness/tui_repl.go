@@ -133,8 +133,59 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 	go screen.Run(33*time.Millisecond, done)
 
 	scanner := perm.NewScanner(lines)
+
+	// The run happens in the background so the screen keeps reading
+	// input: a line typed while the model works joins the queue the run
+	// drains between turns.
+	//
+	// The channel is the flag: nil means no run is in progress, and only
+	// the REPL goroutine assigns it.
+	var runDone chan struct{}
+
+	startRun := func(prompt string) {
+		ch := make(chan struct{})
+		runDone = ch
+		go func() {
+			defer close(ch)
+			res, err := ag.Run(ctx, prompt)
+			if err != nil {
+				transcript.Appendf("error: %v", err)
+				screen.RequestRender()
+				return
+			}
+			// The streamed text is committed when the message ends; the
+			// final answer may not have been streamed at all.
+			if res.Final != "" {
+				history := transcript.Lines()
+				last := ""
+				if len(history) > 0 {
+					last = history[len(history)-1]
+				}
+				if res.Final != last {
+					transcript.Append(res.Final)
+				}
+			}
+			screen.RequestRender()
+			// A line typed in the last instant of the run was queued
+			// after the agent's last drain; run it here.
+			if err := ag.Drain(ctx); err != nil {
+				transcript.Appendf("error: %v", err)
+				screen.RequestRender()
+			}
+		}()
+	}
+
+	wait := func() {
+		if runDone != nil {
+			<-runDone
+			runDone = nil
+		}
+	}
+
 	for {
 		if !scanner.Scan() {
+			// A run in progress still gets to finish.
+			wait()
 			return
 		}
 		line := strings.TrimSpace(scanner.Text())
@@ -143,6 +194,20 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 		if line == "" {
 			continue
 		}
+
+		// While a run is in progress, a plain line is a follow-up: it
+		// joins the queue. Slash commands and "!" still work, because
+		// they never touch the model.
+		if runDone != nil && !strings.HasPrefix(line, "/") && !strings.HasPrefix(line, "!") {
+			if err := ag.Enqueue(line); err != nil {
+				transcript.Appendf("error: %v", err)
+			} else {
+				transcript.Appendf("> %s (queued)", line)
+			}
+			screen.RequestRender()
+			continue
+		}
+
 		if strings.HasPrefix(line, "/") {
 			if err := handleCommand(ctx, commands, line, promptOut, promptOut); errors.Is(err, errExitREPL) {
 				return
@@ -166,25 +231,8 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 		transcript.Appendf("> %s", line)
 		screen.RequestRender()
 
-		res, err := ag.Run(ctx, line)
-		if err != nil {
-			transcript.Appendf("error: %v", err)
-			screen.RequestRender()
-			continue
-		}
-		// The streamed text is committed when the message ends; the
-		// final answer may not have been streamed at all.
-		if res.Final != "" {
-			history := transcript.Lines()
-			last := ""
-			if len(history) > 0 {
-				last = history[len(history)-1]
-			}
-			if res.Final != last {
-				transcript.Append(res.Final)
-			}
-		}
-		streaming = false
-		screen.RequestRender()
+		// Two runs must never interleave on one history.
+		wait()
+		startRun(line)
 	}
 }

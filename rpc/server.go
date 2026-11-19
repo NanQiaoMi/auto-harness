@@ -128,6 +128,9 @@ func (s *Server) eventTypes() []ext.EventType {
 	return []ext.EventType{
 		ext.EventAgentStart,
 		ext.EventAgentEnd,
+		ext.EventAgentBeforeSettle,
+		ext.EventAgentSettled,
+		ext.EventRetry,
 		ext.EventTurnStart,
 		ext.EventTurnEnd,
 		ext.EventMessageStart,
@@ -419,6 +422,21 @@ func (s *Server) prompt(ctx context.Context, command *Command) *Response {
 		return Failure(command.ID, CmdPrompt, "the prompt has no message")
 	}
 
+	// A prompt that arrives while a run is in progress is queued, not
+	// rejected: the agent drains it between turns, so a client can
+	// steer the work it started. The server's own flag is checked
+	// because it is set synchronously, while the agent's is set by the
+	// goroutine that may not have entered Run yet.
+	s.mu.Lock()
+	running := s.streaming
+	s.mu.Unlock()
+	if running {
+		if err := s.Agent.Enqueue(args.Message); err != nil {
+			return Failure(command.ID, CmdPrompt, err.Error())
+		}
+		return Success(command.ID, CmdPrompt, map[string]any{"disposition": "queued"})
+	}
+
 	// The run gets its own context, so the abort command can stop it
 	// without stopping the server.
 	runCtx, cancel := context.WithCancel(ctx)
@@ -447,11 +465,12 @@ func (s *Server) prompt(ctx context.Context, command *Command) *Response {
 		// A client may react to agent_settled immediately. Clear the
 		// run state first so checkpoint restore is not rejected by a
 		// stale streaming flag.
+		//
+		// The settled event itself comes from the bus: the agent emits
+		// it once the queue and the settle handlers are done, which is
+		// what "no automatic work is left" means. Writing one here too
+		// would report idle twice.
 		finish()
-		s.write(Event{
-			Type: EventAgentSettled,
-			Data: map[string]any{"aborted": runCtx.Err() != nil},
-		})
 	}()
 
 	return nil
@@ -832,6 +851,12 @@ func (s *Server) emitEvent(e *ext.Event) {
 			"model":    e.Request.Model,
 			"tools":    e.Request.Tools,
 		}
+	}
+	// The settled record always says whether the run was aborted: a
+	// client that reads "aborted" and gets nothing cannot tell a
+	// finished run from an old server that never wrote the field.
+	if e.Type == ext.EventAgentSettled {
+		data["aborted"] = e.Aborted
 	}
 	if e.Data != nil {
 		for key, value := range e.Data {

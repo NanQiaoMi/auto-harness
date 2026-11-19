@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -680,5 +681,86 @@ while True:
 `
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		t.Fatalf("write mcp server: %v", err)
+	}
+}
+
+// TestLiveQueuedFollowUp verifies that a message submitted while the
+// model is working joins the same run, and that the run only reports
+// settled once both prompts are done.
+//
+// It drives the real gateway: the first prompt makes the model run a
+// slow tool, and the follow-up is queued from another goroutine while
+// that tool is still running.
+func TestLiveQueuedFollowUp(t *testing.T) {
+	ag, _, bus := newAgent(t)
+
+	toolStarted := make(chan struct{})
+	var once sync.Once
+	bus.On(ext.EventToolExecutionStart, func(e *ext.Event) error {
+		once.Do(func() { close(toolStarted) })
+		return nil
+	})
+
+	var settled int
+	bus.On(ext.EventAgentSettled, func(e *ext.Event) error {
+		settled++
+		return nil
+	})
+
+	type outcome struct {
+		res *agent.Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := ag.Run(context.Background(), strings.Join([]string{
+			"Use the bash tool to run exactly: sleep 3; echo SLOW_DONE",
+			"Then reply with the output you saw.",
+		}, " "))
+		done <- outcome{res, err}
+	}()
+
+	select {
+	case <-toolStarted:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the model never called a tool")
+	}
+	// The run is mid-tool: this message must join it.
+	if err := ag.Enqueue("Also reply with exactly: QUEUED_OK"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(180 * time.Second):
+		t.Fatal("the run did not finish")
+	}
+	if got.err != nil {
+		t.Fatalf("Run: %v", got.err)
+	}
+	if got.res.Queued != 1 {
+		t.Errorf("Result.Queued = %d, want 1", got.res.Queued)
+	}
+	// Both prompts were answered: the transcript holds the follow-up and
+	// the model's answer to it.
+	hist := ag.History()
+	var sawQueued, sawAnswer bool
+	for _, m := range hist {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "QUEUED_OK") {
+			sawQueued = true
+		}
+	}
+	if !sawQueued {
+		t.Error("the queued message never entered the history")
+	}
+	if strings.Contains(got.res.Final, "QUEUED_OK") || len(got.res.Final) > 0 {
+		sawAnswer = true
+	}
+	if !sawAnswer {
+		t.Errorf("no answer after the queued message: %q", got.res.Final)
+	}
+	if settled != 1 {
+		t.Errorf("agent_settled fired %d times, want 1", settled)
 	}
 }

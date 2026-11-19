@@ -10,8 +10,17 @@ const (
 // leaves values that are already present untouched, so an extension
 // may annotate or override an event before the agent fills its own
 // identity.
+//
+// Nothing is attached for the primary agent: its events must keep
+// whatever Data they came with. Allocating an empty map for every
+// event would make "Data == nil" useless as a test — a text delta
+// would look like it carried a payload, and a consumer that tells an
+// answer from reasoning by that test would misfile every answer.
 func SetDelegation(e *Event, agentID, parentAgentID, workspace string) {
 	if e == nil {
+		return
+	}
+	if agentID == "" && parentAgentID == "" && workspace == "" {
 		return
 	}
 	if e.Data == nil {

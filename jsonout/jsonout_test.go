@@ -385,3 +385,85 @@ func TestConcurrentWritesDoNotInterleave(t *testing.T) {
 		}
 	}
 }
+
+// TestRetryRecordCarriesTheAttempt checks the retry record.
+//
+// A consumer that wants to show "retrying in 2s" reads these fields;
+// one that does not care ignores the record.
+func TestRetryRecordCarriesTheAttempt(t *testing.T) {
+	bus := ext.NewBus()
+	var out bytes.Buffer
+	writer := NewWriter(&out)
+	writer.Install(bus)
+
+	mustEmit(t, bus, &ext.Event{
+		Type:   ext.EventRetry,
+		Reason: "503 service unavailable",
+		Data: map[string]any{
+			"attempt":     2,
+			"maxAttempts": 3,
+			"delayMs":     int64(2000),
+		},
+	})
+
+	parsed := records(t, &out)
+	if len(parsed) != 1 {
+		t.Fatalf("the records are %v", parsed)
+	}
+	record := parsed[0]
+	if record["type"] != EventRetry {
+		t.Errorf("type = %v, want %s", record["type"], EventRetry)
+	}
+	if record["reason"] != "503 service unavailable" {
+		t.Errorf("reason = %v", record["reason"])
+	}
+	if record["attempt"].(float64) != 2 || record["maxAttempts"].(float64) != 3 {
+		t.Errorf("attempt fields are %v", record)
+	}
+	if record["delayMs"].(float64) != 2000 {
+		t.Errorf("delayMs = %v, want 2000", record["delayMs"])
+	}
+}
+
+// TestSettledRecordCarriesTheAbortFlag checks that a run that was
+// stopped is distinguishable from one that finished.
+func TestSettledRecordCarriesTheAbortFlag(t *testing.T) {
+	bus := ext.NewBus()
+	var out bytes.Buffer
+	writer := NewWriter(&out)
+	writer.Install(bus)
+
+	mustEmit(t, bus, &ext.Event{Type: ext.EventAgentSettled, Aborted: true})
+
+	parsed := records(t, &out)
+	if len(parsed) != 1 {
+		t.Fatalf("the records are %v", parsed)
+	}
+	if parsed[0]["type"] != EventAgentSettled {
+		t.Errorf("type = %v", parsed[0]["type"])
+	}
+	if parsed[0]["aborted"] != true {
+		t.Errorf("aborted = %v, want true", parsed[0]["aborted"])
+	}
+}
+
+// TestSettleBoundaryEventsReachTheStream checks that both settle events
+// are carried: a consumer that reacts to the last actionable boundary
+// must see it.
+func TestSettleBoundaryEventsReachTheStream(t *testing.T) {
+	bus := ext.NewBus()
+	var out bytes.Buffer
+	writer := NewWriter(&out)
+	writer.Install(bus)
+
+	mustEmit(t, bus, &ext.Event{Type: ext.EventAgentBeforeSettle})
+	mustEmit(t, bus, &ext.Event{Type: ext.EventAgentSettled})
+
+	parsed := records(t, &out)
+	if len(parsed) != 2 {
+		t.Fatalf("the records are %v", parsed)
+	}
+	if parsed[0]["type"] != EventAgentBeforeSettle || parsed[1]["type"] != EventAgentSettled {
+		t.Errorf("the records are %v", parsed)
+	}
+}

@@ -32,6 +32,14 @@ type Config struct {
 	Context *ContextConfig `json:"context,omitempty"`
 	// MaxTurns caps agent loop iterations (default 25).
 	MaxTurns int `json:"max_turns,omitempty"`
+	// MaxRetries bounds how often a failed model request is retried
+	// (default 3). Zero keeps the default; a negative value disables
+	// retries.
+	MaxRetries int `json:"max_retries,omitempty"`
+	// RetryBaseDelayMs is the first backoff delay (default 1000).
+	RetryBaseDelayMs int `json:"retry_base_delay_ms,omitempty"`
+	// RetryMaxDelayMs caps one backoff delay (default 60000).
+	RetryMaxDelayMs int `json:"retry_max_delay_ms,omitempty"`
 	// Subagents bounds delegated background agents.
 	Subagents *SubagentConfig `json:"subagents,omitempty"`
 	// SystemPrompt replaces the built-in system prompt when non-empty.
@@ -261,6 +269,15 @@ func merge(dst *Config, src Config) {
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
+	}
+	if src.MaxRetries != 0 {
+		dst.MaxRetries = src.MaxRetries
+	}
+	if src.RetryBaseDelayMs > 0 {
+		dst.RetryBaseDelayMs = src.RetryBaseDelayMs
+	}
+	if src.RetryMaxDelayMs > 0 {
+		dst.RetryMaxDelayMs = src.RetryMaxDelayMs
 	}
 	if src.Subagents != nil {
 		dst.Subagents = src.Subagents

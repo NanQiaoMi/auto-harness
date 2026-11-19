@@ -14,6 +14,8 @@ tui/                  差分渲染终端 UI（对齐 pi-tui）                  
   screen.go             屏幕抽象：主屏/备用屏、同步输出、渲染循环
   transcript.go         Transcript（对话滚动区）+ Editor（输入行）
 agent/                核心 agent 循环（turn loop + 工具执行 + 全程事件）   ← pi-agent-core
+  agent.go              Run / 队列 / settle 边界 / 工具循环
+  retry.go              请求级重试：错误分类 + 指数退避
 agentprofile/         Agent 环境描述：模型 / 提示词 / 工具 / 插件 / MCP / Skills / 压缩策略
 llm/                  统一 LLM API：中立消息模型、流式事件、模型目录      ← pi-ai
   llm.go                Message / ToolCall / Provider / Stream 抽象
@@ -191,15 +193,18 @@ auto-harness 的 `/tree` 不做摘要，所以只支持取消；pi 的 fork 分 
 auto-harness 的 `/fork` 和 `/clone` 都从某个 entry 开始，所以用 `reason: fork/clone`
 区分命令，`session_before_switch` 目前只有 `reason: "new"`（没有切换会话的命令）。
 
-**7. 事件集：auto-harness 多的一个，pi 多的是十八个。** auto-harness 有 pi 没有的
+**7. 事件集：auto-harness 多两个，pi 多的是十五个。** auto-harness 有 pi 没有的
 `request_start`（一次模型请求的事实：provider / model / 工具数，用来测量单次请求而
-不改 provider）。pi 多出来的 17 个大致分三类：
+不改 provider）和 `retry`（失败请求即将重试：原因、第几次、退避多久）。pi 多出来的
+15 个大致分三类：
 **provider 挂钩**（`before_provider_headers` / `before_provider_request` /
 `after_provider_response` / `provider_stream_event`）、**UI 与选择**
 （`ui_prompt_start` / `ui_prompt_end` / `model_select` / `thinking_level_select` /
-`cache_warming_decision`）、**生命周期补集**（`agent_settled` / `agent_before_settle` /
-`session_compact_failed` / `session_tree` / `session_info_changed` /
-`context_with_system` / `mcp_servers_change` / `resources_discover`）。
+`cache_warming_decision`）、**生命周期补集**（`session_compact_failed` /
+`session_tree` / `session_info_changed` / `context_with_system` /
+`mcp_servers_change` / `resources_discover`）。
+生命周期那类里 pi 有的 `agent_settled` / `agent_before_settle`，auto-harness 也补齐了
+（见下面「重试、排队与 settle 边界」）。
 
 auto-harness 的 provider 挂钩不在事件总线上，而在 `llm.Hooks`（`BeforeHeaders` /
 `BeforeRequest` / `AfterResponse`）——它们服务的是 HTTP 层（改头、改请求体、读响应），
@@ -483,6 +488,49 @@ RPC 使用 `get_agents`、`get_agent`、`cancel_agent`。任务状态为
 [docs/subagents.md](docs/subagents.md)。
 
 
+### 重试、排队与 settle 边界（[agent/retry.go](agent/retry.go)）
+
+一次 Run 的边界比「一次补全」长得多：模型可能在跑的过程中被你插一句话，网络可能抖
+一下，扩展可能想在收尾前再补一件事。这三件事各自有独立的机制，共用一条时间线：
+
+```text
+input → before_agent_start → agent_start → turns → agent_end
+   → 队列非空？            → 再跑一次（agent_start 又发一遍）
+   → agent_before_settle   → 有 Continue / 注入消息？→ 再跑一次
+   → agent_settled         ← 这才是「真的空闲了」
+```
+
+**重试**只针对一次模型请求。判定照抄 pi 的思路，但用一张正则表而不是错误类型：
+**不可重试的判定优先**——额度耗尽、账单、鉴权失败、模型不存在、上下文超长这些
+再试一次也是同样的结果；其余命中限流（429 / overloaded）、服务端故障（5xx）、传输
+中断（ECONNRESET / unexpected EOF / 流被打断）的才重试。退避是
+`base * 2^(attempt-1)` 并封顶（默认 1s 起、60s 封顶），`max_retries` 为负即关闭。
+一个关键约束：**只有一段内容都没流出去时才重试**。一旦 delta 已经开始进转录，第二
+次尝试会把同一句话打印两遍，所以中途断流直接报错而不是重试。每次尝试都会发
+`request_start`，重试前发 `retry` 事件（原因、第几次、退避毫秒数），所以观测者既
+能算出总耗时也能显示「正在重试」。
+
+**排队**解决的是「模型还在干活，你又敲了一句话」。这句话不会被拒绝，也不会打断当前
+轮：它进队列，由正在跑的这次 Run 在**安全的位置**取走——`turn_end` 之后（助手消息
+和工具结果都已落进历史，绝不会插在工具调用和它的结果之间），以及每次底层 run 结束
+之后。`Enqueue` 永远不因为「没有正在跑」而报错，所以「RPC 已接受这次运行」和「运行
+真的开始」之间那个小窗口不会丢输入；`Run` 入口也会先清一次队列。REPL 和 TUI 因此
+把 `Run` 放到后台 goroutine，主循环继续读行：跑着的时候敲的行显示 `[queued: …]`
+并入队，斜杠命令和 `!` 快捷照常可用（它们不碰模型）。RPC 的 `prompt` 同理，响应里
+的 `disposition` 是 `started` 还是 `queued`。
+
+**settle 边界**是扩展在自动工作结束前的最后决策点：`agent_before_settle` 的 handler
+可以置 `e.Continue` 再跑一轮，或者往 `e.Messages` 里塞消息（塞了也会续跑）。它和
+`turn_end` 的区别是层次：`turn_end` 在一轮之内，settle 在整次 run 之后。续跑有上限
+（8 轮），否则一个每次都要求续跑的 handler 会让 agent 永远忙不完、提示符永远不回来。
+**中止的运行不经过 settle 边界**，直接发 `agent_settled{aborted:true}`——用户按了
+Ctrl+C 之后不该再有扩展把活接着干下去。
+
+所以 `agent_end` 不是「跑完了」：它后面可能还跟着排队消息、一次重试或一次续跑。
+真正可以当作空闲信号的是 `agent_settled`，这也是 RPC 客户端和 JSON 流消费者应该等
+的那条记录。
+
+
 ### 配置
 
 优先级：内置默认 < `~/.harness/config.json` < 环境变量 < CLI flag。
@@ -507,6 +555,9 @@ RPC 使用 `get_agents`、`get_agent`、`cancel_agent`。任务状态为
     "artifact_dir": ""              // 空 = <session_dir>/artifacts/<session-id>
   },
   "max_turns": 25,
+  "max_retries": 3,                 // 一次模型请求最多重试几次（负数 = 不重试）
+  "retry_base_delay_ms": 1000,      // 首次退避，之后翻倍
+  "retry_max_delay_ms": 60000,      // 单次退避上限
   "subagents": {                    // 委派子代理（全部可省略）
     "max_concurrent": 4,
     "max_depth": 3,
@@ -610,7 +661,10 @@ ext.SetDelegation(e, id, parent, workspace)
 |------|------|------------|
 | `session_start` / `session_shutdown` | 会话开始/结束 | — |
 | `before_agent_start` | 每次 Run 开始前 | 改 `e.Message`、`e.SystemPrompt`；`e.Cancel` 取消 |
-| `agent_start` / `agent_end` | Run 开始/结束 | `agent_end` 携带 `e.Usage` |
+| `agent_start` / `agent_end` | 一次底层 run 开始/结束 | `agent_end` 携带 `e.Usage`；**不是**空闲信号，后面可能还有排队消息、重试或续跑 |
+| `agent_before_settle` | 自动工作全部做完之前的最后决策点 | `e.Continue` 再跑一轮；`e.Messages` 注入消息（注入也会续跑） |
+| `agent_settled` | 真的空闲了（队列空、续跑耗尽） | 只读：`e.Aborted` 说明是中止而不是跑完；**这才是空闲信号** |
+| `retry` | 失败的模型请求即将重试 | 只读：`e.Reason`、`e.Data["attempt"]` / `"maxAttempts"` / `"delayMs"` |
 | `turn_start` / `turn_end` | 每轮补全前后 | `turn_end`：`e.Continue` 强制续跑、`e.Messages` 注入消息 |
 | `request_start` | 一次模型请求开始 | 只读：携带 `e.Request`（provider / model / 工具数），便于测量单次请求 |
 | `message_start` / `message_update` / `message_end` | 助手消息流式产出 | `message_end` 可替换 `e.Message` |
@@ -1089,13 +1143,13 @@ REPL 是给人用的。要把 harness 嵌进 IDE、脚本（任何语言）或�
 | 记录 | 形状 | 说明 |
 |------|------|------|
 | 响应 | `{"id":"…","type":"response","command":"…","success":true,"data":{…}}` | 回答一条命令；`error` 说明失败原因 |
-| 事件 | `{"type":"…","data":{…}}` | 会话活动：`agent_start` / `turn_start` / `message_update` / `tool_execution_start` / `request_start` / `agent_end` / `agent_settled` … |
+| 事件 | `{"type":"…","data":{…}}` | 会话活动：`agent_start` / `turn_start` / `message_update` / `tool_execution_start` / `request_start` / `retry` / `agent_end` / `agent_before_settle` / `agent_settled` … |
 
 命令清单：
 
 | 命令 | 参数 | 作用 |
 |------|------|------|
-| `prompt` | `message` | 发一句话给模型。**响应在运行开始时就回**，`data.disposition` 是 `started`，答案走事件流 |
+| `prompt` | `message` | 发一句话给模型。**响应在运行开始时就回**，`data.disposition` 是 `started`，答案走事件流。**运行中再发**是 `queued`：消息进队列，由正在跑的那次运行在 `turn_end` 后取走 |
 | `abort` | — | 停掉当前运行 |
 | `new_session` | — | 开一个新会话 |
 | `get_state` | — | 当前模型、会话 id、消息数、是否在跑 |
@@ -1174,6 +1228,11 @@ RPC 的记录是「响应 + 事件」，JSON 模式只有「事件」。
 - **工具调用带 `toolCall`**，工具结果带 `result`（含 `isError`）——渲染一次运行需要
   知道跑了什么、结果如何。
 - **token 用量在 `agent_end` 的 `usage` 里**。
+- **`retry` 记录**带 `reason` / `attempt` / `maxAttempts` / `delayMs`，所以一次运行
+  里的抖动是看得见的，而不是一段静默的等待。
+- **`agent_settled` 是空闲信号**，`agent_end` 不是：`agent_end` 之后可能还有重试、
+  排队消息或 `agent_before_settle` 的续跑，那些都会再发一次 `agent_start`。
+  `agent_settled` 带 `"aborted": true` 时表示是被中止的，不是跑完的。
 
 stdout 归事件流所有：模型文本、工具提示、诊断全走 stderr。退出码报告这次运行成功
 没有，脚本不用解析流就知道该不该继续。
@@ -1597,6 +1656,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 - **Ed25519 registry 签名与发布者信任根**（[plugins/signing.go](plugins/signing.go)、[plugins/keys.go](plugins/keys.go)、[cmd/plugin-registry-sign/](cmd/plugin-registry-sign/)）：registry 用 `ed25519` + 公钥 SHA-256 `key_id` 声明 publisher，签名覆盖带协议域的规范化元数据、artifact URL 和 artifact 摘要，因此无法只替换下载地址或版本说明绕过认证。信任根默认是 `~/.harness/plugin_publishers.json`（可用 `HARNESS_PLUGIN_TRUST_FILE` 覆盖），只保存原始 Ed25519 公钥；`-plugin-trust` / `-plugin-untrust` / `-plugin-trust-list` 管理它。远程 registry 默认拒绝未签名文档，本地未签名 registry 仍可用于离线开发，`-plugin-allow-unsigned` 是显式且带警告的远程降级。lockfile schema 2 保存 publisher / key ID，兼容旧 schema 1；lockfile 本身不是签名账本，吊销、过期、anti-rollback/freshness 和自动更新仍未实现。签名解决发布者认证，不替代运行时沙箱或权限模型
 - **插件进程监督与健康可见性**（[ext/supervisor.go](ext/supervisor.go)、[plugins/plugins.go](plugins/plugins.go)）：插件可在 `plugin.json` 显式启用 `never` / `on_failure` / `always` 进程恢复，`max_restarts` 按扩展实例生命周期累计成功替换次数（默认 3，最大 100），初始退避默认 250ms、指数增长到默认 30s 上限。每次重启都重新握手，运行时 manifest 必须与首次批准时完全一致，禁止靠崩溃增加工具或削掉 consult 授权；预算耗尽、manifest 漂移或握手失败后停止。重启空窗期工具调用报错，所有策略 gate fail-closed，`input` 保持原样；`/plugins` 与 `get_plugins` 暴露状态、计数、最近退出和错误。它是进程恢复而非 checkpoint：子进程从零开始，不续跑未完成任务
 - **Agent 环境 profile 与插件清单**（[agentprofile/](agentprofile/)、[plugins/](plugins/)、[docs/agent-profiles.md](docs/agent-profiles.md)）：把「不同环境需要不同 Agent」变成声明式装配，而不是在启动代码里加分支。一份 profile 同时选择模型、系统提示词、turn/token 上限、工具白名单、进程插件、MCP server、Skills、Prompt 模板和上下文压缩参数；`tools`/`plugins`/`mcp_servers`/`skills`/`prompts` 区分「省略 = 全部」和「`[]` = 全不要」，工具白名单在所有工具源注册完以后最后一次生效，引用不存在的工具直接启动失败。目录插件用 `plugin.json` 描述启动命令、固定 cwd、环境变量和能力授权，`cwd`/路径型入口在 symlink 解析后不能逃出插件目录；`capabilities` 只有 `tools`/`hooks`/`events`，未授权的工具、consult hook 和推送事件分别拒绝或丢弃，旧可执行文件插件继续兼容。profile 的 `env` 只传给插件和 stdio MCP 子进程，不写回 harness 进程环境，`/profile` 只显示键不显示值。历史信任已保存的项目可以读取 `.harness/profiles/<name>.json`，首次信任仍然先判项目；用户路径和显式 profile 路径分别受支持。可见性有 REPL `/profile`、`/plugins` 和 RPC `get_profile`、`get_plugins`
+- **重试、排队与 settle 边界**（[agent/retry.go](agent/retry.go)、[agent/agent.go](agent/agent.go)）：补上 pi 生命周期里「一次 run 不等于一次补全」的那部分。**重试**只针对一次模型请求，分类沿用 pi 的思路——额度/账单/鉴权/模型不存在/上下文超长这些**不可重试**优先于限流、5xx、传输中断这些可重试的；退避 `base * 2^(attempt-1)` 封顶（默认 1s 起、60s 顶），`max_retries` 负数即关闭；关键约束是**只有一段内容都没流出去才重试**——delta 一旦进了转录，第二次尝试会把答案打印两遍。**排队**让「模型还在干活时你又敲了一句话」不丢不打断：消息进队列，由正在跑的 run 在 `turn_end` 之后（工具结果都已落地，绝不插在调用和结果之间）和每次底层 run 结束后取走；`Enqueue` 永远不因为「没在跑」报错，所以 RPC 接受运行到运行真正开始之间的小窗口不丢输入。REPL/TUI 因此把 run 放到后台 goroutine，主循环继续读行，跑着时敲的行显示 `[queued: …]`。**settle 边界**给扩展最后一个决策点：`agent_before_settle` 可以 `Continue` 再跑一轮或注入消息，续跑有 8 轮上限（否则 handler 能让 agent 永远忙不完）；中止的运行**跳过** settle 边界，直接 `agent_settled{aborted:true}`。结论是 `agent_end` 不再是空闲信号——后面可能还有排队消息、重试或续跑——`agent_settled` 才是，RPC 客户端和 JSON 流消费者等的都是它
 - **JSON 输出模式**（[jsonout/](jsonout/)、[cmd/harness/json.go](cmd/harness/json.go)）：`-print` 给的是答案，`--mode json` 给的是**整次运行**——这是 harness 层最后一个缺口（pi 里剩下的两个缺口：RPC 模式与 JSON 模式，都已补上）。输出是 JSONL 事件流：**第一行是会话头**（消费者看到任何事件之前就知道是哪个会话的，事件流存成文件能靠头找回会话），**最后一行是 `agent_settled`**（这一行之前没有更多自动工作，读到它就可以停）。**事件名就是 harness 自己的事件名**，消费者不用学第二套词汇——`agent_start` / `turn_start` / `request_start` / `message_start` / `message_update` / `message_end` / `tool_execution_start` / `tool_execution_end` / `agent_end`。两个设计点：`message_update` **只带增量**不带整条消息（增量多了整条消息跟着膨胀，消息本身在 `message_start` / `message_end` 里）；**推理的增量带 `"thinking": true`**，和答案的增量分开标记，否则同一个流里分不清哪段在想哪段在答。和 RPC 模式的分工：RPC 是**被驱动**的（stdin 收命令，来来回回），JSON 模式是**一次性**的（给一句提示、跑完、退出），两者共用 JSONL 分帧但记录形状不同（RPC 是「响应 + 事件」，JSON 只有「事件」）。stdout 同样归事件流所有，退出码报告运行成不成功
 - **RPC 模式**（[rpc/](rpc/)、[cmd/harness/rpc.go](cmd/harness/rpc.go)）：harness 从「人用的 REPL」变成**长驻子进程**，被别的程序用 JSON 驱动——IDE、任何语言的脚本、自制 UI 都行，这是把 harness 嵌进别人产品里的唯一入口。协议是严格的 JSONL：stdin 收命令，stdout 收响应和事件；**stdout 归协议所有**（模型文本、工具提示、诊断全改走 stderr），一个读 stdout 的客户端永远不该看到别的东西。分帧**只按 LF 切**——记录里的字符串可以含 U+2028 / U+2029（JSON 里是普通字符），按它们切会把一条记录劈成两半；CRLF 客户端也接受。**响应和事件共用一条流**，所以客户端按 **ID 关联**而不是按顺序猜（一次运行的十几个事件会插在命令的响应之间）。`prompt` 是异步的：响应只说明「收下了」（`data.disposition` = `started`），答案走事件流，客户端要等 `agent_settled`（不是 `agent_end`——一次运行后面可能还跟着重试）；**响应必须先于运行写出**，否则一个等整轮跑完再读的客户端会在写满的管道上死锁。一条坏记录不毁会话：解析失败回一条 `command: "parse"` 的失败响应，流继续；未知命令同理。**关掉 stdin 是有序关机**：harness 等在跑的那次运行结束再退出，所以「发完 prompt 立刻关 stdin」的客户端仍然拿得到答案（这里踩过一个坑：run 的 context 原本挂在 server 的 context 上，stdin 一 EOF 就把运行取消了，于是加了 `sync.WaitGroup` 单独跟踪在跑的任务）。权限层在 RPC 模式下**不弹窗**——stdin 归协议所有，审批提示会吃掉客户端的记录；模型侧的调用走「无人可问就拒绝」，客户端自己发的 `bash` 走 `user_bash` 拦截（那是用户自己的命令，不是模型的）。这个模式还逼出了两处真实缺陷：agent 的 `history` 和 `cfg` 原本**没有任何锁**，而 RPC 会在模型还在跑的时候读历史、换模型，于是补上了 mutex 和「配置按快照读」；`isTerminal(stdin)` 在 RPC 模式下为真会让权限提示去读协议流，于是 RPC 一律视为非交互
 - **Skills（Agent Skills 标准）**（[skills/](skills/)、[frontmatter/](frontmatter/)）：模板是**用户敲命令**才用的，Skills 是**模型自己按 description 决定**要不要读的——两者一起才是 pi 完整的「自己可改」。一个 skill 是一个目录 + 一个 `SKILL.md`；**渐进披露**是这一层的核心：启动时只有 `name`/`description`/`location` 进系统提示词（XML 格式），完整指示留在磁盘上，模型觉得对上了才用 `read` 去读，所以 50 个 skill 的库代价是 50 行提示词而不是 50 份文档。发现位置有四个（项目 `.harness/skills`、项目 `.agents/skills` 及其各层父目录、用户 `~/.harness/skills`、用户 `~/.agents/skills`），**先到先得**：项目在前、用户在后，项目定义的 skill 归项目，用户的目录是项目没用到的名字的兜底。`description` **必填**——它是唯一的路由信号，没有它 skill 根本不会被加载；`name` 缺省取目录名，`disable-model-invocation: true` 让 skill 只走 `/skill:name` 不进提示词；**不合规只警告不拒绝**（超长描述、非法名字照样加载），坏掉一个文件不该拖垮整个库。两个入口：模型自己 `read` 读 `SKILL.md`，或 `/skill:name [参数]` 显式把指示塞进对话（不依赖模型选不选对）。`/skills` 列出所有 skill 和来源路径。skill 的指示**跑不了任何东西**——它就是模型的输入，模型要跑脚本仍然得走工具，走同一套权限。`frontmatter/` 是抽出来的共用解析器（`prompts/` 和 `skills/` 共用一套 YAML 语义，标量 + `|`/`>` 块标量 + 转义；集合类型拒绝而不是猜），`prompts/` 里原先那份重复实现因此删掉了

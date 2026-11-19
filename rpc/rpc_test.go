@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/NanQiaoMi/auto-harness/agent"
 	"github.com/NanQiaoMi/auto-harness/contextmgr"
@@ -823,4 +824,89 @@ func (p *blockingProvider) Name() string { return "blocking" }
 func (p *blockingProvider) Chat(ctx context.Context, req llm.ChatRequest) (llm.Stream, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+// TestPromptDuringARunIsQueued checks that a client can steer the work
+// it started: a prompt that arrives mid-run is accepted and queued,
+// rather than rejected or run alongside the first one.
+func TestPromptDuringARunIsQueued(t *testing.T) {
+	provider := &firstCallBlocksProvider{started: make(chan struct{}), release: make(chan struct{})}
+	server, _, _ := newTestServer(t, provider)
+	c := newClient(t, server)
+	defer c.close()
+
+	c.send(map[string]any{"id": "r1", "type": CmdPrompt, "message": "first"})
+	first := c.response(CmdPrompt)
+	if first["success"] != true {
+		t.Fatalf("the first prompt was rejected: %v", first)
+	}
+	data, _ := first["data"].(map[string]any)
+	if data["disposition"] != "started" {
+		t.Errorf("first disposition = %v, want started", data["disposition"])
+	}
+
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run never reached the provider")
+	}
+
+	c.send(map[string]any{"id": "r2", "type": CmdPrompt, "message": "follow up"})
+	second := c.response(CmdPrompt)
+	if second["success"] != true {
+		t.Fatalf("the queued prompt was rejected: %v", second)
+	}
+	data, _ = second["data"].(map[string]any)
+	if data["disposition"] != "queued" {
+		t.Errorf("second disposition = %v, want queued", data["disposition"])
+	}
+
+	close(provider.release)
+	settled := c.settled()
+	if settled == nil {
+		t.Fatal("the run never settled")
+	}
+
+	// The follow-up was run, not dropped: the provider saw both calls.
+	if got := provider.calls(); got != 2 {
+		t.Errorf("provider calls = %d, want 2", got)
+	}
+}
+
+// firstCallBlocksProvider blocks its first request until the test
+// releases it, then answers everything.
+type firstCallBlocksProvider struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	n       int
+}
+
+func (p *firstCallBlocksProvider) Name() string { return "gated" }
+
+func (p *firstCallBlocksProvider) calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.n
+}
+
+func (p *firstCallBlocksProvider) Chat(ctx context.Context, req llm.ChatRequest) (llm.Stream, error) {
+	p.mu.Lock()
+	p.n++
+	n := p.n
+	p.mu.Unlock()
+	if n == 1 {
+		p.once.Do(func() { close(p.started) })
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	msg := llm.Message{Role: llm.RoleAssistant, Content: "answer"}
+	return &fakeStream{events: []llm.StreamEvent{
+		{Type: llm.EventTextDelta, Text: msg.Content},
+		{Type: llm.EventDone, Message: &msg},
+	}}, nil
 }

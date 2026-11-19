@@ -43,13 +43,10 @@ func runJSONMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bu
 		return 1
 	}
 
-	// The settled record closes the stream. A consumer that reads
-	// until it knows the run is over stops here.
-	aborted := ctx.Err() != nil
-	if err := writer.WriteSettled(aborted); err != nil {
-		fmt.Fprintf(os.Stderr, "harness: %v\n", err)
-		return 1
-	}
+	// The settled record comes from the bus: the agent emits it once the
+	// queue and the settle handlers are done. Writing one here as well
+	// would report idle twice, and the manual one could not know about
+	// the work the agent still had.
 
 	// A run that ended badly is a failure, and the exit code says so.
 	if res.Cancelled {

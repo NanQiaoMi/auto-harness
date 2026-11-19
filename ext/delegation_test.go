@@ -45,3 +45,25 @@ func TestDelegationHelpersHandleNilAndMissingData(t *testing.T) {
 		t.Fatal("empty event returned delegation metadata")
 	}
 }
+
+// TestPrimaryAgentEventsKeepTheirData checks that a primary agent's
+// event is not given an empty payload map.
+//
+// The distinction matters: a consumer tells an answer from reasoning
+// by testing Data for nil (the thinking delta is the one that carries a
+// flag). An empty map on every event would make every answer look like
+// reasoning.
+func TestPrimaryAgentEventsKeepTheirData(t *testing.T) {
+	e := &Event{Type: EventMessageUpdate, Text: "answer"}
+	SetDelegation(e, "", "", "")
+	if e.Data != nil {
+		t.Errorf("Data = %v, want nil for a primary-agent event", e.Data)
+	}
+
+	// A delegated agent's event does carry identity.
+	e = &Event{Type: EventMessageUpdate, Text: "answer"}
+	SetDelegation(e, "agent-1", "parent-0", "/tmp/ws")
+	if AgentID(e) != "agent-1" || ParentAgentID(e) != "parent-0" || Workspace(e) != "/tmp/ws" {
+		t.Errorf("delegation metadata = %v", e.Data)
+	}
+}

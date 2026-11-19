@@ -31,6 +31,24 @@ const (
 	EventAgentStart       EventType = "agent_start"
 	EventAgentEnd         EventType = "agent_end"
 
+	// EventAgentBeforeSettle is the last actionable boundary of a run:
+	// the turns are over, but more work may still follow. A handler may
+	// append Messages and set Continue to run again. Retries and queued
+	// messages have already been dealt with, so this sees the repaired
+	// conversation.
+	EventAgentBeforeSettle EventType = "agent_before_settle"
+
+	// EventAgentSettled is final and notification-only: no automatic
+	// work is left, so a status integration can report idle. A run that
+	// was aborted goes straight from agent_end to here, skipping
+	// agent_before_settle.
+	EventAgentSettled EventType = "agent_settled"
+
+	// EventRetry fires when a failed model request is about to be tried
+	// again. Reason is the error; Data carries "attempt",
+	// "maxAttempts" and "delayMs".
+	EventRetry EventType = "retry"
+
 	// Turn lifecycle (a turn is one model completion + its tool executions)
 	EventTurnStart EventType = "turn_start"
 	EventTurnEnd   EventType = "turn_end" // may set Continue / append Messages
@@ -144,8 +162,13 @@ type Event struct {
 	// BlockReason is the message shown when a call is blocked.
 	BlockReason string
 
-	// Continue asks the agent loop to run another turn (turn_end).
+	// Continue asks the agent loop to run another turn (turn_end) or
+	// another low-level run (agent_before_settle).
 	Continue bool
+
+	// Aborted reports that a run ended because it was cancelled
+	// (agent_settled).
+	Aborted bool
 
 	// Usage accumulates token accounting on agent_end.
 	Usage llm.Usage

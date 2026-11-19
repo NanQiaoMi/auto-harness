@@ -41,9 +41,15 @@ const (
 	EventAgentStart = "agent_start"
 	// EventAgentEnd fires when a run ends.
 	EventAgentEnd = "agent_end"
+	// EventAgentBeforeSettle is the last actionable boundary of a run:
+	// an extension may still ask for one more turn here.
+	EventAgentBeforeSettle = "agent_before_settle"
 	// EventAgentSettled fires when the harness has no more automatic
 	// work. It is the last record of a successful run.
 	EventAgentSettled = "agent_settled"
+	// EventRetry fires when a failed model request is about to be
+	// tried again.
+	EventRetry = "retry"
 	// EventTurnStart fires when one turn starts.
 	EventTurnStart = "turn_start"
 	// EventTurnEnd fires when one turn ends.
@@ -113,6 +119,13 @@ type Record struct {
 	// WillRetry says the run will be retried, so agent_end is not
 	// the last word.
 	WillRetry bool `json:"willRetry,omitempty"`
+	// Reason is the error a retry record is about.
+	Reason string `json:"reason,omitempty"`
+	// Attempt is the retry number (1-based) and MaxAttempts the budget.
+	Attempt     int `json:"attempt,omitempty"`
+	MaxAttempts int `json:"maxAttempts,omitempty"`
+	// DelayMs is the backoff before the attempt.
+	DelayMs int64 `json:"delayMs,omitempty"`
 }
 
 // Message is a message on the wire.
@@ -246,6 +259,9 @@ func (w *Writer) eventTypes() []ext.EventType {
 	return []ext.EventType{
 		ext.EventAgentStart,
 		ext.EventAgentEnd,
+		ext.EventAgentBeforeSettle,
+		ext.EventAgentSettled,
+		ext.EventRetry,
 		ext.EventTurnStart,
 		ext.EventTurnEnd,
 		ext.EventMessageStart,
@@ -312,6 +328,13 @@ func (w *Writer) emit(e *ext.Event) {
 			InputTokens:  e.Usage.InputTokens,
 			OutputTokens: e.Usage.OutputTokens,
 		}
+	case ext.EventAgentSettled:
+		record.Aborted = e.Aborted
+	case ext.EventRetry:
+		record.Reason = e.Reason
+		record.Attempt, _ = e.Data["attempt"].(int)
+		record.MaxAttempts, _ = e.Data["maxAttempts"].(int)
+		record.DelayMs, _ = e.Data["delayMs"].(int64)
 	}
 
 	_ = w.write(record)

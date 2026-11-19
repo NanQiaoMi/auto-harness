@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,15 @@ type Config struct {
 	// asks it for a provider on every turn, so switching models can
 	// switch providers too (see llm.Registry.ProviderFor).
 	Resolver func(modelID string) (llm.Provider, error)
+	// MaxRetries bounds how many times a failed model request is tried
+	// again. Zero means the default (3); a negative value disables
+	// retries.
+	MaxRetries int
+	// RetryBaseDelay is the first backoff delay (default 1s). Each
+	// further attempt doubles it.
+	RetryBaseDelay time.Duration
+	// RetryMaxDelay caps one backoff delay (default 60s).
+	RetryMaxDelay time.Duration
 }
 
 // Checkpointer creates a rollback point before a mutating tool runs.
@@ -78,6 +88,11 @@ type Result struct {
 	Usage llm.Usage
 	// Cancelled reports whether a hook cancelled the run.
 	Cancelled bool
+	// Queued counts the follow-up messages this run drained from the
+	// queue.
+	Queued int
+	// Continued reports that a settle handler asked for another run.
+	Continued bool
 }
 
 // Agent runs the tool-calling loop over a conversation history,
@@ -101,7 +116,15 @@ type Agent struct {
 
 	history []llm.Message
 
-	// mu guards the history and the configuration.
+	// queued holds messages a caller submitted while a run was in
+	// progress. Run drains them between turns, so a follow-up typed
+	// mid-run becomes the next thing the model sees rather than an
+	// error or a lost line.
+	queued []string
+	// running reports whether a Run is in progress.
+	running bool
+
+	// mu guards the history, the configuration and the queue.
 	//
 	// A run appends to the history while an outside caller may read
 	// it: the RPC server answers "get_messages" while the model is
@@ -131,6 +154,15 @@ func New(cfg Config, bus *ext.Bus, registry *tools.Registry) *Agent {
 	}
 	if cfg.SystemPrompt == "" {
 		cfg.SystemPrompt = DefaultSystemPrompt
+	}
+	if cfg.MaxRetries == 0 {
+		cfg.MaxRetries = DefaultMaxRetries
+	}
+	if cfg.RetryBaseDelay <= 0 {
+		cfg.RetryBaseDelay = DefaultRetryBaseDelay
+	}
+	if cfg.RetryMaxDelay <= 0 {
+		cfg.RetryMaxDelay = DefaultRetryMaxDelay
 	}
 	return &Agent{cfg: cfg, Bus: bus, Tools: registry}
 }
@@ -221,6 +253,75 @@ func (a *Agent) providerFor() (llm.Provider, error) {
 	return provider, nil
 }
 
+// Submit hands the agent a message to process after the current turn.
+//
+// It is how a follow-up typed while the model is working gets in: the
+// message is queued rather than rejected, and Run picks it up between
+// turns so it lands where a user message belongs — after the assistant
+// message and its tool results, never between a tool call and its
+// result. When no run is in progress the message starts one.
+//
+// The bool result reports whether a run was already in progress, so a
+// caller can tell "queued" from "started".
+func (a *Agent) Submit(ctx context.Context, text string) (queued bool, err error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false, fmt.Errorf("agent: an empty message cannot be submitted")
+	}
+	a.mu.Lock()
+	if a.running {
+		a.queued = append(a.queued, text)
+		a.mu.Unlock()
+		return true, nil
+	}
+	a.mu.Unlock()
+
+	_, err = a.Run(ctx, text)
+	return false, err
+}
+
+// Enqueue queues a message for the next turn, without starting a run
+// of its own.
+//
+// It is for callers that already know a run is active: the RPC server
+// tracks that itself, and using Submit there would race with the
+// goroutine that has not entered Run yet. A message queued just before
+// a run starts is picked up by that run, so the small window between
+// "a run was accepted" and "the run began" does not lose input.
+func (a *Agent) Enqueue(text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return fmt.Errorf("agent: an empty message cannot be queued")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.queued = append(a.queued, text)
+	return nil
+}
+
+// Queue returns the messages waiting to be processed.
+func (a *Agent) Queue() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.queued...)
+}
+
+// Running reports whether a run is in progress.
+func (a *Agent) Running() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.running
+}
+
+// takeQueued removes and returns the queued messages.
+func (a *Agent) takeQueued() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := a.queued
+	a.queued = nil
+	return out
+}
+
 // History returns the current conversation history.
 func (a *Agent) History() []llm.Message {
 	a.mu.Lock()
@@ -248,10 +349,44 @@ func (a *Agent) ReloadHistory() {
 	a.SetHistory(a.Session.Tree().Messages())
 }
 
+// maxSettleRounds bounds how many times a settle handler may ask for
+// another run. It is a safety net: a handler that always asks would
+// keep the agent busy forever and never hand the prompt back.
+const maxSettleRounds = 8
+
 // Run executes one user turn: the input is appended to history, then the
 // model is called repeatedly (with tool executions in between) until it
 // stops requesting tools or MaxTurns is reached.
+//
+// A run does not end at the first quiet turn. Messages submitted while
+// it was working are drained and run next, and a settle handler may
+// ask for one more run; agent_settled fires only when none of that is
+// left, so a consumer can treat it as "the agent is idle now".
 func (a *Agent) Run(ctx context.Context, input string) (*Result, error) {
+	a.mu.Lock()
+	a.running = true
+	a.mu.Unlock()
+	return a.run(ctx, input)
+}
+
+// run is the body of Run.
+//
+// The running flag is raised by Run and lowered here, because only this
+// function knows when the queue is empty: the check and the clear happen
+// in one critical section, so a message queued concurrently is either
+// drained by this run or seen by a caller that then starts the next one.
+func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
+	// cleared reports that the normal exit already lowered the flag. A
+	// run that started in the meantime must not have it lowered again.
+	cleared := false
+	defer func() {
+		a.mu.Lock()
+		if !cleared {
+			a.running = false
+		}
+		a.mu.Unlock()
+	}()
+
 	// input: extensions see the prompt before it becomes a message.
 	// A handler may rewrite the text (add context, redact a secret,
 	// expand an alias) or deal with it itself, in which case the agent
@@ -296,56 +431,168 @@ func (a *Agent) Run(ctx context.Context, input string) (*Result, error) {
 	}
 
 	a.append(userMsg)
-	a.emit(&ext.Event{Type: ext.EventAgentStart})
 
 	res := &Result{}
-	defer func() {
-		endEv := &ext.Event{Type: ext.EventAgentEnd, Usage: res.Usage}
-		a.emit(endEv)
-	}()
 
-	for turn := 0; turn < maxTurns; turn++ {
-		if err := ctx.Err(); err != nil {
-			return res, err
-		}
-		res.Turns++
-		a.emit(&ext.Event{Type: ext.EventTurnStart})
+	// A message queued just before this run began belongs to it: the
+	// caller accepted it while a run was starting.
+	for _, text := range a.takeQueued() {
+		a.append(llm.Message{Role: llm.RoleUser, Content: text})
+		res.Queued++
+	}
 
-		assistantMsg, usage, req, err := a.complete(ctx)
-		if err != nil {
-			return res, err
-		}
-		res.Usage.Add(usage)
+	// One low-level run: the turns until the model stops asking for
+	// tools. A queued message or a settle handler may start another.
+	runTurns := func() error {
+		for turn := 0; turn < maxTurns; turn++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			res.Turns++
+			a.emit(&ext.Event{Type: ext.EventTurnStart})
 
-		a.append(assistantMsg)
-		if assistantMsg.Content != "" {
-			res.Final = assistantMsg.Content
+			assistantMsg, usage, req, err := a.complete(ctx)
+			if err != nil {
+				return err
+			}
+			res.Usage.Add(usage)
+
+			a.append(assistantMsg)
+			if assistantMsg.Content != "" {
+				res.Final = assistantMsg.Content
+			}
+
+			// Execute requested tool calls (if any).
+			for i := range assistantMsg.ToolCalls {
+				call := assistantMsg.ToolCalls[i]
+				toolMsg := a.executeTool(ctx, &call)
+				a.append(toolMsg)
+			}
+
+			// turn_end: extensions may append entries (e.g. reminders)
+			// or force an extra turn. The queue is drained here too: a
+			// message typed while the tools ran belongs after their
+			// results, never between a call and its result.
+			turnEv := &ext.Event{
+				Type:     ext.EventTurnEnd,
+				Continue: len(assistantMsg.ToolCalls) > 0,
+				Request:  req,
+			}
+			a.emit(turnEv)
+			for _, injected := range turnEv.Messages {
+				a.append(injected)
+			}
+			if queued := a.takeQueued(); len(queued) > 0 {
+				for _, text := range queued {
+					a.append(llm.Message{Role: llm.RoleUser, Content: text})
+					res.Queued++
+				}
+				continue
+			}
+			if turnEv.Continue {
+				continue
+			}
+			break
+		}
+		return nil
+	}
+
+	// The settle boundary is bounded: a handler that asks for another
+	// run every time would otherwise keep the agent busy forever, and
+	// the user would never get the prompt back.
+	settleRounds := 0
+
+	for {
+		a.emit(&ext.Event{Type: ext.EventAgentStart})
+		runErr := runTurns()
+		a.emit(&ext.Event{Type: ext.EventAgentEnd, Usage: res.Usage})
+		if runErr != nil {
+			// An aborted run has no settle boundary to offer: it goes
+			// straight to the notification.
+			a.emit(&ext.Event{Type: ext.EventAgentSettled, Aborted: ctx.Err() != nil})
+			return res, runErr
 		}
 
-		// Execute requested tool calls (if any).
-		for i := range assistantMsg.ToolCalls {
-			call := assistantMsg.ToolCalls[i]
-			toolMsg := a.executeTool(ctx, &call)
-			a.append(toolMsg)
-		}
-
-		// turn_end: extensions may append entries (e.g. reminders) or
-		// force an extra turn.
-		turnEv := &ext.Event{
-			Type:     ext.EventTurnEnd,
-			Continue: len(assistantMsg.ToolCalls) > 0,
-			Request:  req,
-		}
-		a.emit(turnEv)
-		for _, injected := range turnEv.Messages {
-			a.append(injected)
-		}
-		if turnEv.Continue {
+		// Queued messages start another run, so agent_end is not the
+		// last word.
+		if queued := a.takeQueued(); len(queued) > 0 {
+			appendQueued(a, res, queued)
 			continue
 		}
-		break
+
+		// agent_before_settle: the last chance to add work. A handler
+		// that appends messages or asks for a continuation gets another
+		// run; otherwise the run is over.
+		more := false
+		if settleRounds < maxSettleRounds {
+			settleEv := &ext.Event{Type: ext.EventAgentBeforeSettle}
+			a.emit(settleEv)
+			added := len(settleEv.Messages) > 0
+			for _, injected := range settleEv.Messages {
+				a.append(injected)
+			}
+			if settleEv.Continue || added {
+				settleRounds++
+				res.Continued = true
+				more = true
+			}
+		} else if a.Logf != nil {
+			a.Logf("agent_before_settle: stopped after %d continuations", settleRounds)
+		}
+		if more {
+			continue
+		}
+
+		// The run is over when nothing is queued. Checking the queue and
+		// clearing the running flag happen in one critical section, so a
+		// message that arrives concurrently cannot be lost: Enqueue sees
+		// either a live run (which drains it here) or a clear flag (and
+		// its caller starts the next run).
+		a.mu.Lock()
+		if len(a.queued) == 0 {
+			a.running = false
+			cleared = true
+			a.mu.Unlock()
+			a.emit(&ext.Event{Type: ext.EventAgentSettled, Aborted: ctx.Err() != nil})
+			return res, nil
+		}
+		queued := a.queued
+		a.queued = nil
+		a.mu.Unlock()
+		appendQueued(a, res, queued)
 	}
-	return res, nil
+}
+
+// appendQueued adds the queued messages to history as user messages.
+func appendQueued(a *Agent, res *Result, queued []string) {
+	for _, text := range queued {
+		a.append(llm.Message{Role: llm.RoleUser, Content: text})
+		res.Queued++
+	}
+}
+
+// Drain runs whatever is queued, without a prompt of its own, until the
+// queue is empty.
+//
+// It covers the moment a run ends: a message can be queued after the
+// run's last drain and before it returns, and nothing else would pick it
+// up. A caller that queues input from another goroutine (a REPL whose
+// main loop keeps reading) calls this once its run returns.
+func (a *Agent) Drain(ctx context.Context) error {
+	for {
+		a.mu.Lock()
+		if len(a.queued) == 0 {
+			a.mu.Unlock()
+			return nil
+		}
+		first := a.queued[0]
+		a.queued = a.queued[1:]
+		a.mu.Unlock()
+
+		if _, err := a.Run(ctx, first); err != nil {
+			return err
+		}
+	}
 }
 
 // complete performs one model completion, streaming events as they
@@ -437,45 +684,50 @@ func (a *Agent) complete(ctx context.Context) (llm.Message, llm.Usage, ext.Reque
 		Model:    cfg.Model,
 		Tools:    len(req.Tools),
 	}
-	a.emit(&ext.Event{Type: ext.EventRequestStart, Request: info})
 
-	started := time.Now()
-	stream, err := provider.Chat(ctx, req)
-	if err != nil {
-		return llm.Message{}, llm.Usage{}, info, fmt.Errorf("agent: provider chat: %w", err)
-	}
-	defer stream.Close()
-
-	a.emit(&ext.Event{Type: ext.EventMessageStart})
-
+	// The request is retried on transient failures (see retry.go).
+	//
+	// Only a failure that arrives before any content has been streamed
+	// is retried: once deltas are on their way to the transcript, a
+	// second attempt would show the answer twice. A mid-stream failure
+	// is reported instead.
 	var msg llm.Message
 	var usage llm.Usage
-	for {
-		ev, err := stream.Recv()
-		if err == io.EOF {
+	started := time.Now()
+	for attempt := 0; ; attempt++ {
+		a.emit(&ext.Event{Type: ext.EventRequestStart, Request: info})
+		started = time.Now()
+
+		streamed, err := a.streamOnce(ctx, provider, req, &msg, &usage, &info)
+		if err == nil {
 			break
 		}
-		if err != nil {
-			info.Duration = time.Since(started)
-			return llm.Message{}, usage, info, fmt.Errorf("agent: stream: %w", err)
+		info.Duration = time.Since(started)
+
+		cfg := a.Config()
+		if streamed || attempt >= cfg.MaxRetries || !isRetryable(err) {
+			return llm.Message{}, usage, info, err
 		}
-		switch ev.Type {
-		case llm.EventTextDelta:
-			msg.Content += ev.Text
-			a.emit(&ext.Event{Type: ext.EventMessageUpdate, Text: ev.Text})
-		case llm.EventThinkingDelta:
-			// Thinking output is surfaced to extensions but not kept in
-			// the transcript (models do not expect it back).
-			a.emit(&ext.Event{Type: ext.EventMessageUpdate, Text: ev.Text, Data: map[string]any{"thinking": true}})
-		case llm.EventToolCall:
-			msg.ToolCalls = append(msg.ToolCalls, *ev.ToolCall)
-		case llm.EventDone:
-			if ev.Message != nil {
-				msg = *ev.Message
-			}
-			usage = ev.Usage
-			info.StopReason = ev.StopReason
+		delay := retryDelay(cfg.RetryBaseDelay, cfg.RetryMaxDelay, attempt+1)
+		a.emit(&ext.Event{
+			Type:   ext.EventRetry,
+			Reason: err.Error(),
+			Data: map[string]any{
+				"attempt":     attempt + 1,
+				"maxAttempts": cfg.MaxRetries,
+				"delayMs":     delay.Milliseconds(),
+			},
+		})
+		if !sleepCtx(ctx, delay) {
+			return llm.Message{}, usage, info, ctx.Err()
 		}
+		// The retried request starts from a clean message: the failed
+		// attempt may have collected tool calls it never returned.
+		msg = llm.Message{}
+		usage = llm.Usage{}
+		info.StopReason = ""
+		info.Usage = llm.Usage{}
+		info.Duration = 0
 	}
 	msg.Role = llm.RoleAssistant
 	info.Usage = usage
@@ -488,6 +740,50 @@ func (a *Agent) complete(ctx context.Context) (llm.Message, llm.Usage, ext.Reque
 		msg = *endEv.Message
 	}
 	return msg, usage, info, nil
+}
+
+// streamOnce performs one model request and streams it into msg.
+//
+// The second result reports whether any content reached the
+// transcript: a failure after that point cannot be retried without
+// showing the answer twice, so the caller must report it instead.
+func (a *Agent) streamOnce(ctx context.Context, provider llm.Provider, req llm.ChatRequest, msg *llm.Message, usage *llm.Usage, info *ext.Request) (streamed bool, err error) {
+	stream, err := provider.Chat(ctx, req)
+	if err != nil {
+		return false, fmt.Errorf("agent: provider chat: %w", err)
+	}
+	defer stream.Close()
+
+	a.emit(&ext.Event{Type: ext.EventMessageStart})
+
+	for {
+		ev, err := stream.Recv()
+		if err == io.EOF {
+			return streamed, nil
+		}
+		if err != nil {
+			return streamed, fmt.Errorf("agent: stream: %w", err)
+		}
+		switch ev.Type {
+		case llm.EventTextDelta:
+			streamed = true
+			msg.Content += ev.Text
+			a.emit(&ext.Event{Type: ext.EventMessageUpdate, Text: ev.Text})
+		case llm.EventThinkingDelta:
+			// Thinking output is surfaced to extensions but not kept in
+			// the transcript (models do not expect it back).
+			streamed = true
+			a.emit(&ext.Event{Type: ext.EventMessageUpdate, Text: ev.Text, Data: map[string]any{"thinking": true}})
+		case llm.EventToolCall:
+			msg.ToolCalls = append(msg.ToolCalls, *ev.ToolCall)
+		case llm.EventDone:
+			if ev.Message != nil {
+				*msg = *ev.Message
+			}
+			*usage = ev.Usage
+			info.StopReason = ev.StopReason
+		}
+	}
 }
 
 // ContextStatus reports the active context budget and the last

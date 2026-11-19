@@ -448,10 +448,13 @@ func main() {
 		Model:    cfg.Model,
 		// The project context files fold into the system prompt, and
 		// the skills are advertised in it.
-		SystemPrompt:  skillSetup.systemPrompt(promptSetup.systemPrompt(cfg.SystemPrompt)),
-		MaxTokens:     cfg.MaxTokens,
-		ContextWindow: configuredWindow,
-		MaxTurns:      cfg.MaxTurns,
+		SystemPrompt:   skillSetup.systemPrompt(promptSetup.systemPrompt(cfg.SystemPrompt)),
+		MaxTokens:      cfg.MaxTokens,
+		ContextWindow:  configuredWindow,
+		MaxTurns:       cfg.MaxTurns,
+		MaxRetries:     cfg.MaxRetries,
+		RetryBaseDelay: time.Duration(cfg.RetryBaseDelayMs) * time.Millisecond,
+		RetryMaxDelay:  time.Duration(cfg.RetryMaxDelayMs) * time.Millisecond,
 		ContextBudget: func(modelID string) (int, int) {
 			if info, ok := llmReg.Model(modelID); ok {
 				return info.ContextWindow, info.MaxOutput
@@ -750,16 +753,72 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 	}
 	permSetup.setLineReader(lines)
 	scanner := perm.NewScanner(lines)
+
+	// The run happens in the background so the REPL can keep reading:
+	// a line typed while the model is working is queued for the next
+	// turn instead of being lost or rejected.
+	//
+	// The channel is the flag: nil means no run is in progress, and
+	// only the REPL goroutine assigns it, so nothing here needs a lock.
+	var runDone chan struct{}
+
+	startRun := func(prompt string) {
+		ch := make(chan struct{})
+		runDone = ch
+		go func() {
+			defer close(ch)
+			res, err := ag.Run(ctx, prompt)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return
+			}
+			if res.Final != "" && !strings.HasSuffix(res.Final, "\n") {
+				fmt.Println()
+			}
+			// A line typed in the last instant of the run was queued
+			// after the agent's last drain; run it here rather than
+			// leaving it for the next prompt.
+			if err := ag.Drain(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			}
+		}()
+	}
+
+	// wait blocks until the run in progress ends, if any.
+	wait := func() {
+		if runDone != nil {
+			<-runDone
+			runDone = nil
+		}
+	}
+
 	for {
 		fmt.Print("\n> ")
 		if !scanner.Scan() {
 			fmt.Println()
+			// A run in progress still gets to finish: the user may have
+			// queued work and pressed Ctrl+D.
+			wait()
 			return
 		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
+
+		// While a run is in progress, a plain line is a follow-up: it
+		// joins the queue the run drains between turns. Slash commands
+		// and the "!" shortcut still work, because they never touch the
+		// model.
+		if runDone != nil && !strings.HasPrefix(line, "/") && !strings.HasPrefix(line, "!") {
+			if err := ag.Enqueue(line); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			} else {
+				fmt.Printf("[queued: %s]\n", line)
+			}
+			continue
+		}
+
 		if strings.HasPrefix(line, "/") {
 			if err := handleCommand(ctx, commands, line, os.Stdout, os.Stderr); errors.Is(err, errExitREPL) {
 				return
@@ -777,14 +836,11 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 			}
 			continue
 		}
-		res, err := ag.Run(ctx, line)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			continue
-		}
-		if res.Final != "" && !strings.HasSuffix(res.Final, "\n") {
-			fmt.Println()
-		}
+
+		// A previous run may still be going; wait for it before starting
+		// another, so two runs never interleave on one history.
+		wait()
+		startRun(line)
 	}
 }
 
