@@ -1772,6 +1772,14 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 - **请求级 hooks**：`llm.Hooks` 提供 `BeforeHeaders` / `BeforeRequest` / `AfterResponse`，扩展可改写 HTTP 头、请求体并观察响应（对齐 pi 的 `before_provider_headers` 等）
 - **Gemini 协议**：新增 `llm.GeminiProvider`（generateContent / streamGenerateContent，支持工具调用）
 
+尚未做的深化项（按优先级）：
+
+- **真正的隔离**：进程扩展目前靠能力声明和 fail-closed 的 gate 约束，不是沙箱——子进程能读到的东西和 harness 一样多。WASM 插件或按插件降权的子进程是下一步，`Backend` / `Provider` 这类 Go 接口换不进去，所以这是能力隔离而不是接口化能解决的。
+- **工具级重试**：现在的重试只针对模型请求。一次 `bash` 超时或一次网络工具失败，模型得自己重新发一次调用；让工具声明可重试 + 退避，能省掉一轮往返。
+- **预算闸门**：`max_turns` 和上下文预算是有的，但一次运行花掉多少 token / 多少钱没有上限，也没有"到 X 就停"的开关。
+- **多模态输入**：`llm.Message` 目前只有文本，图片输入（pi 的 `input: ["text","image"]`）没有落地。
+- **事件 schema 版本化与 SDK**：事件形状写在 `ext/ext.go` 和 README 里，没有版本号也没有别的语言的客户端库——RPC 客户端目前只能照文档手写。
+
 ## License
 
 MIT
