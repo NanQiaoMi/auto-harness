@@ -99,6 +99,13 @@ func (r *Registry) RegisterProtocol(name string, build func(ProviderConfig) (Pro
 	if build == nil {
 		return nil, fmt.Errorf("llm: protocol %q has no builder", name)
 	}
+	// A built-in name is not available: an extension that replaced
+	// "openai" would change every OpenAI-compatible provider at once,
+	// including the ones it never heard of.
+	switch name {
+	case "openai", "anthropic", "gemini":
+		return nil, fmt.Errorf("llm: protocol %q is built in and cannot be replaced", name)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.protocols == nil {

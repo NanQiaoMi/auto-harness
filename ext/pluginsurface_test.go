@@ -65,6 +65,11 @@ func TestRegisterProtocolRejectsDuplicates(t *testing.T) {
 	if err := api.RegisterProtocol("", build); err == nil {
 		t.Error("an empty protocol name was accepted")
 	}
+	// A built-in protocol is not an extension's to replace: it would
+	// change every provider that uses it, including unknown ones.
+	if err := api.RegisterProtocol("openai", build); err == nil {
+		t.Error("a built-in protocol was replaced")
+	}
 }
 
 func TestRegisterProtocolNeedsARegistry(t *testing.T) {

@@ -237,6 +237,32 @@ auto-harness 的 provider 挂钩不在事件总线上，而在 `llm.Hooks`（`Be
 server、权限规则、prompt 模板、skill 都算，`AGENTS.md` / `SYSTEM.md` 不算（它们是
 给模型的指示，不会自己运行）。
 
+**10. 工具并行：pi 默认全并行、由工具声明"必须串行"；auto-harness 默认串行、由工具
+声明"只读"。** pi 的 `executeToolCalls` 在 `toolExecution` 不是 `sequential` 且没有哪个
+调用来自 `executionMode: "sequential"` 的工具时，把整批调用一起 `Promise.all`——并行是
+默认，串行是工具的声明。auto-harness 反过来：只有**连续的** `ReadOnly` 调用并行，其余
+一律串行，未注册的工具按"有副作用"处理。差别在于默认值朝哪边错：pi 的默认要求每个
+工具作者判断自己是否安全并发，漏写就是并发；auto-harness 的默认要求工具作者声明自己
+只读，漏写就是串行。代价是 auto-harness 少一点吞吐（一个写把前后两段读隔开），换的是
+一个没声明的新工具不会突然和别的调用竞争同一个文件。另外 pi 有 `terminate`（一批工具
+里某个调用可以让剩下的不跑），auto-harness 没有——见第 1 条。
+
+**11. 换 provider：pi 换的是"整条 provider"，auto-harness 换的是"线上协议"。**
+pi 的 `registerProvider(name, config)` 一次接管一个 provider 名：baseUrl、apiKey、模型
+列表、自定义 `streamSimple`、OAuth 登录流程、`refreshModels` 全在一起，还能覆盖内置
+provider 的 baseUrl 做代理。auto-harness 的 `RegisterProtocol(name, build)` 更窄：只注册
+"怎么建一个 `llm.Provider`"，模型和 provider 条目分开注册（`RegisterModel` /
+`RegisterProvider`），没有 OAuth、没有远程刷新模型列表、也不能覆盖内置协议名（重名
+直接拒绝）。窄是刻意的——harness 的登录和凭据是 config 和环境的职责，不该在扩展
+生命周期里重写；换来的是一条清楚的边界：扩展提供**协议实现**，身份、凭据和选择仍是
+内核的。
+
+同理，pi 用 `context` / `context_with_system` 两个事件让扩展改每次请求的消息（前者不含
+system，后者连 system 和工具声明一起交给 handler），auto-harness 用
+`UseContextPolicy` 包 builder：不是"改这一份 messages"，而是"替换生成这份 messages 的
+那层"。差别是 pi 的 handler 每次请求跑一遍、看不到预算和压缩，auto-harness 的策略在
+预算和压缩的外面，可以决定要不要压缩、压完再改。
+
 ## 快速开始
 
 ```bash
