@@ -292,7 +292,7 @@ export OPENAI_API_KEY=oc_sk-...
 ./bin/harness -print "解释一下这个项目的结构"
 
 # 一次运行最多花多少 token（输入+输出+缓存，默认不限）
-./bin/harness -max-run-tokens 200000 "把这个仓库的测试跑一遍"
+./bin/harness -print -max-run-tokens 200000 "把这个仓库的测试跑一遍"
 
 # JSON 输出模式：整次运行作为 JSON 事件流（会话头 → 事件 → agent_settled）
 ./bin/harness --mode json "解释一下这个项目的结构" | jq -r 'select(.type=="message_end") | .message.content'
