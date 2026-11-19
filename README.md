@@ -15,7 +15,7 @@ tui/                  差分渲染终端 UI（对齐 pi-tui）                  
   transcript.go         Transcript（对话滚动区）+ Editor（输入行）
 agent/                核心 agent 循环（turn loop + 工具执行 + 全程事件）   ← pi-agent-core
   agent.go              Run / 队列 / settle 边界 / 工具循环
-  retry.go              请求级重试：错误分类 + 指数退避
+  retry.go              重试：错误分类 + 指数退避（模型请求与工具调用共用）
 agentprofile/         Agent 环境描述：模型 / 提示词 / 工具 / 插件 / MCP / Skills / 压缩策略
 llm/                  统一 LLM API：中立消息模型、流式事件、模型目录      ← pi-ai
   llm.go                Message / ToolCall / Provider / Stream 抽象
@@ -195,7 +195,8 @@ auto-harness 的 `/fork` 和 `/clone` 都从某个 entry 开始，所以用 `rea
 
 **7. 事件集：auto-harness 多两个，pi 多的是十五个。** auto-harness 有 pi 没有的
 `request_start`（一次模型请求的事实：provider / model / 工具数，用来测量单次请求而
-不改 provider）和 `retry`（失败请求即将重试：原因、第几次、退避多久）。pi 多出来的
+不改 provider）和 `retry`（失败请求或工具调用即将重试：原因、第几次、退避多久）。
+pi 多出来的
 15 个大致分三类：
 **provider 挂钩**（`before_provider_headers` / `before_provider_request` /
 `after_provider_response` / `provider_stream_event`）、**UI 与选择**
@@ -289,6 +290,9 @@ export OPENAI_API_KEY=oc_sk-...
 
 # one-shot 模式（脚本/自动化）
 ./bin/harness -print "解释一下这个项目的结构"
+
+# 一次运行最多花多少 token（输入+输出+缓存，默认不限）
+./bin/harness -max-run-tokens 200000 "把这个仓库的测试跑一遍"
 
 # JSON 输出模式：整次运行作为 JSON 事件流（会话头 → 事件 → agent_settled）
 ./bin/harness --mode json "解释一下这个项目的结构" | jq -r 'select(.type=="message_end") | .message.content'
@@ -538,6 +542,26 @@ input → before_agent_start → agent_start → turns → agent_end
 `request_start`，重试前发 `retry` 事件（原因、第几次、退避毫秒数），所以观测者既
 能算出总耗时也能显示「正在重试」。
 
+**工具级重试**是另一层，解决的是「一次 `bash` 超时、一次网络工具失败，模型得自己
+再发一次调用」。工具用 `Retryable` 声明自己的失败是暂时的，agent 就用同一套退避重跑
+这次调用（`tool_max_retries` 默认 1，负数关闭；`tool_retry_delay_ms` 默认 500ms 起、
+翻倍、封顶 `retry_max_delay_ms`）。边界只有一条，但很关键：**只有 `error` 返回会
+重试，`Result{IsError: true}` 不会**——后者是工具的答案（命令退出码非零、文件不存在），
+重跑一遍只会得到同样的答案，那是模型该看到的信息，不是基础设施故障。进程扩展的
+`tool.execute` 传输失败返回 `error` 而不是 `IsError`，所以进程重启后可以再试一次。
+声明 `Retryable` 的工具必须**幂等**：agent 用同样的参数重发，半途生效的写操作会被
+做第二遍。重试前发同一个 `retry` 事件，`e.Data["tool"]` 说明是哪个工具，`attempt` /
+`maxAttempts` / `delayMs` 语义与模型请求一致。运行被中止时退避立即中断，不会让用户
+等满一个退避周期。
+
+**预算闸门**给一次运行一个 token 上限（`max_run_tokens`，或 CLI `-max-run-tokens`）。
+计数是 `input + output + cacheRead + cacheWrite`——缓存命中的 token 也是 provider 处理
+过的，不算进去的话一次缓存命中率高的运行看起来像免费的。检查发生在**每轮之间**，所以
+一次运行最多超支一个请求：下一个请求多大只有构造出来才知道，而构造本身就是大头。到
+点后历史原样保留、`Result.BudgetExceeded` 置位、返回 `ErrBudgetExceeded`，并且
+`agent_settled{aborted:false}` 照常发出——这是「按预算停下」，不是用户中止，扩展不该
+以为出了故障。
+
 **排队**解决的是「模型还在干活，你又敲了一句话」。这句话不会被拒绝，也不会打断当前
 轮：它进队列，由正在跑的这次 Run 在**安全的位置**取走——`turn_end` 之后（助手消息
 和工具结果都已落进历史，绝不会插在工具调用和它的结果之间），以及每次底层 run 结束
@@ -583,9 +607,12 @@ Ctrl+C 之后不该再有扩展把活接着干下去。
     "artifact_dir": ""              // 空 = <session_dir>/artifacts/<session-id>
   },
   "max_turns": 25,
+  "max_run_tokens": 0,              // 一次运行最多花多少 token（0 = 不限）
   "max_retries": 3,                 // 一次模型请求最多重试几次（负数 = 不重试）
   "retry_base_delay_ms": 1000,      // 首次退避，之后翻倍
   "retry_max_delay_ms": 60000,      // 单次退避上限
+  "tool_max_retries": 1,            // 声明 Retryable 的工具失败后重跑几次（省略 = 1，负数 = 不重试）
+  "tool_retry_delay_ms": 500,       // 工具重试的首次退避，之后翻倍（省略 = 500）
   "subagents": {                    // 委派子代理（全部可省略）
     "max_concurrent": 4,
     "max_depth": 3,
@@ -656,6 +683,16 @@ ext.Named("my-ext", func(api *ext.API) error {
         },
     })
 
+    // Retryable：失败是暂时的、且调用幂等时声明它，agent 会退避重跑
+    // 这次调用（只重试 error 返回；IsError 结果是工具的答案，不重跑）
+    api.RegisterTool(&tools.Tool{
+        Name:      "fetch_status",
+        Retryable: true,
+        Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+            return fetchStatus(ctx) // 返回 error 表示「这次没拿到，可以再试」
+        },
+    })
+
     // 3. 自定义斜杠命令
     api.RegisterCommand("hello", &ext.Command{
         Description: "say hello",
@@ -706,7 +743,7 @@ ext.SetDelegation(e, id, parent, workspace)
 | `agent_start` / `agent_end` | 一次底层 run 开始/结束 | `agent_end` 携带 `e.Usage`；**不是**空闲信号，后面可能还有排队消息、重试或续跑 |
 | `agent_before_settle` | 自动工作全部做完之前的最后决策点 | `e.Continue` 再跑一轮；`e.Messages` 注入消息（注入也会续跑） |
 | `agent_settled` | 真的空闲了（队列空、续跑耗尽） | 只读：`e.Aborted` 说明是中止而不是跑完；**这才是空闲信号** |
-| `retry` | 失败的模型请求即将重试 | 只读：`e.Reason`、`e.Data["attempt"]` / `"maxAttempts"` / `"delayMs"` |
+| `retry` | 失败的模型请求或工具调用即将重试 | 只读：`e.Reason`、`e.Data["attempt"]` / `"maxAttempts"` / `"delayMs"`；工具重试另带 `"tool"` |
 | `turn_start` / `turn_end` | 每轮补全前后 | `turn_end`：`e.Continue` 强制续跑、`e.Messages` 注入消息 |
 | `request_start` | 一次模型请求开始 | 只读：携带 `e.Request`（provider / model / 工具数），便于测量单次请求 |
 | `message_start` / `message_update` / `message_end` | 助手消息流式产出 | `message_end` 可替换 `e.Message` |
@@ -777,6 +814,12 @@ harness → 扩展: {"id":2,"method":"tool.execute","params":{"name":"demo_echo"
 harness → 扩展: {"id":4,"method":"command.execute","params":{"name":"greet","args":"there"}}
 扩展 → harness: {"id":4,"result":{"text":"hello there"}}
 ```
+
+manifest 里的工具条目可以写 `"retryable": true`，表示失败是暂时的、且调用幂等；
+harness 会把这条声明搬到注册出来的工具上，agent 于是会退避重跑。不写就是不可重试
+——默认选安全的一边。`tool.execute` 的传输失败（进程不在、连接断了）按 `error`
+返回，所以进程重启后还能再试一次；扩展自己答 `{"is_error":true}` 是它的答案，不会
+重跑。
 
 命令和工具的区别是**谁在跑**：工具是模型决定调的，命令是用户自己敲的，所以命令拿到
 的是用户原文，返回的文本直接打给用户，不进入对话。扩展也可以主动推送事件到 harness
@@ -1320,8 +1363,8 @@ RPC 的记录是「响应 + 事件」，JSON 模式只有「事件」。
 - **工具调用带 `toolCall`**，工具结果带 `result`（含 `isError`）——渲染一次运行需要
   知道跑了什么、结果如何。
 - **token 用量在 `agent_end` 的 `usage` 里**。
-- **`retry` 记录**带 `reason` / `attempt` / `maxAttempts` / `delayMs`，所以一次运行
-  里的抖动是看得见的，而不是一段静默的等待。
+- **`retry` 记录**带 `reason` / `attempt` / `maxAttempts` / `delayMs`，工具重试另带
+  `tool`，所以一次运行里的抖动是看得见的，而不是一段静默的等待。
 - **`agent_settled` 是空闲信号**，`agent_end` 不是：`agent_end` 之后可能还有重试、
   排队消息或 `agent_before_settle` 的续跑，那些都会再发一次 `agent_start`。
   `agent_settled` 带 `"aborted": true` 时表示是被中止的，不是跑完的。
@@ -1742,6 +1785,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 已完成的深化项：
 
+- **工具级重试与运行级预算闸门**（[agent/agent.go](agent/agent.go)、[agent/retry.go](agent/retry.go)、[tools/tools.go](tools/tools.go)）：重试从「只针对模型请求」扩到工具调用。工具用 `Retryable` 声明失败是暂时的、调用幂等，agent 用同一套退避（`base * 2^(attempt-1)`，默认 500ms 起、`tool_max_retries` 默认 1、负数关闭）重跑这次调用，省掉模型自己再发一遍的往返。边界是**只有 `error` 返回才重试**：`Result{IsError:true}` 是工具的答案（命令退出码非零、文件不存在），重跑只会得到同一句话，模型该看到的是它而不是一次重试。进程扩展的 `tool.execute` 传输失败返回 `error`，所以子进程重启后能再试；manifest 的 `"retryable": true` 会搬到注册的工具上。重试前发 `retry` 事件（`e.Data["tool"]` 指明工具），运行被中止时退避立即中断。**预算闸门**给一次运行一个 token 上限：`max_run_tokens` / `-max-run-tokens`，计数是 `input + output + cacheRead + cacheWrite`（缓存命中的 token 也是 provider 处理过的，漏算会让高缓存命中率的运行看起来免费）；检查在每轮之间，所以最多超支一个请求——下一个请求多大只有构造出来才知道。到点后历史保留、`Result.BudgetExceeded` 置位、返回 `ErrBudgetExceeded`，`agent_settled{aborted:false}` 照常发出：按预算停下不是用户中止
 - **可替换的内核层与并行工具调用**（[ext/ext.go](ext/ext.go)、[llm/registry.go](llm/registry.go)、[agent/agent.go](agent/agent.go)）：从「扩展能加东西」走到「扩展能换掉内核的一层」。`api.RegisterProtocol` + `api.RegisterModel` 让一种内核不认识的线上协议像内置的一样路由——注册协议名和 builder，模型声明该协议，`/model` 切过去就由扩展服务；`api.UseContextPolicy` 把内核的预算/自动压缩/artifact 外置变成最内层，扩展注册的策略包在它外面，可以改写输入、改结果或整个接管（不调 `next` 就是不压缩），多策略按注册顺序从外到内，热重载撤销注册所以 `/reload` 不会叠两层；进程扩展补上 `commands` 能力和 `command.execute` 方法，任何语言的插件都能提供斜杠命令，不再只有 Go 扩展可以。工具循环也补了并行：一次助手消息里**连续的只读调用**并行执行（上限 4），有副作用的调用保持串行且顺序不变（写和它后面的读必须看到写的效果），结果按调用顺序而不是完成顺序回填。只读由工具的 `ReadOnly` 声明决定，未知工具按有副作用处理；并行也让工具通知、TUI 流式标志和示例扩展的计数器变成多 goroutine 共享，三处都加了锁，权限层则改成一次只问一个问题。委托出去的子代理沿用父代理的上下文策略——否则一条注入项目规则或替换压缩的策略会在一层之下悄悄失效
 - **委派子代理与独立上下文**（[orchestrator/](orchestrator/)、[cmd/harness/subagents.go](cmd/harness/subagents.go)、[docs/subagents.md](docs/subagents.md)）：父模型用 `agent` 工具启动后台任务，每个任务拥有独立 session、上下文预算、摘要器、artifact 目录和工作区绑定工具；父上下文只收有界摘要，完整转录留在子会话。默认在 Git 仓库内创建 detached worktree，非 Git 目录回退 shared；成功 worktree 保留，需要人工检查或合入，不会自动丢弃用户改动。`max_concurrent` / `max_depth` / 单次超时 / 取消级联 / 原子 JSON 任务记录均已落地；重启将未完成任务标记为 `interrupted` 而不假装续跑。权限层按子代理 workspace 解析路径，后台无法弹父终端，未预批准的 ask 调用 fail-closed。REPL `/agents` 和 RPC `get_agents` / `get_agent` / `cancel_agent` 提供检查与控制
 - **内置 Git、逐步工作区回退与整回合撤销**（[gitkit/](gitkit/)、[docs/git-checkpoints.md](docs/git-checkpoints.md)）：Git 从“让模型跑 shell”变成内核工具。`git` 用参数数组直接执行，不经过 shell，支持 stdin、仓库内 workdir 和非交互环境；`checkpoint` 保存非忽略工作树、精确 index（含 merge 冲突 stage）、HEAD/分支/detached、普通 refs、stash 栈与 reflog。默认在每个修改型工具和用户 `!` / RPC `bash` 前自动快照，快照失败则拒绝执行；只读工具和只读 Git 子命令跳过。检查点记录所属 session、回合 ID 和会话锚点：`/rewind` 只恢复工作区，`/undo` 选择当前回合最早的快照，把工作区和会话 leaf 一起退回第一次修改之前，旧 assistant tool call 不会悬空；同一锚点下的不同分支靠回合 ID 区分，只读回合则只移动会话并明确警告。`restoreContext:true` 在 RPC 中提供同样语义，运行中的 prompt 结束前拒绝恢复与 `new_session`。恢复前先建独立 safety 检查点，所以 `/undo` 本身也能撤回，`/undo <safety-id>` 就是 redo；空选择器不会被 safety 快照带着向前跳。跨分支恢复会做 worktree 占用检查；恢复失败会尝试回滚到 safety，会话移动失败也会回滚工作区。边界明确：忽略文件、`.git/config`、hooks、`FETCH_HEAD`、非 stash reflog、submodule 工作树、未验证的 LFS 行为、进程内存、运行中的请求和工作区外副作用不在恢复范围；快照可能包含未跟踪文件里的密钥，镜像推送 `refs/harness/*` 会带走它们
@@ -1777,8 +1821,6 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 尚未做的深化项（按优先级）：
 
 - **真正的隔离**：进程扩展目前靠能力声明和 fail-closed 的 gate 约束，不是沙箱——子进程和 harness 同一个用户、同一套文件权限，能读到的东西一样多。WASM 插件或按插件降权的子进程是下一步。这一项不是接口化能解决的：上面那三层可替换的内核层要的是 Go 值，跨进程的扩展拿不到，隔离要的是另一件事——限制子进程本身。
-- **工具级重试**：现在的重试只针对模型请求。一次 `bash` 超时或一次网络工具失败，模型得自己重新发一次调用；让工具声明可重试 + 退避，能省掉一轮往返。
-- **预算闸门**：`max_turns` 和上下文预算是有的，但一次运行花掉多少 token / 多少钱没有上限，也没有"到 X 就停"的开关。
 - **多模态输入**：`llm.Message` 目前只有文本，图片输入（pi 的 `input: ["text","image"]`）没有落地。
 - **事件 schema 版本化与 SDK**：事件形状写在 `ext/ext.go` 和 README 里，没有版本号也没有别的语言的客户端库——RPC 客户端目前只能照文档手写。
 
