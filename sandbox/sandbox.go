@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Profile describes what a sandboxed command may access.
@@ -97,7 +98,7 @@ func Exec(ctx context.Context, command string, profile Profile, workdir string) 
 	if workdir != "" {
 		cmd.Dir = workdir
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := outputOf(ctx, cmd)
 	return string(out), true, err
 }
 
@@ -107,8 +108,25 @@ func runCommand(ctx context.Context, command, workdir string) (string, error) {
 	if workdir != "" {
 		cmd.Dir = workdir
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := outputOf(ctx, cmd)
 	return string(out), err
+}
+
+// pipeGrace bounds how long the output pipes may stay open after the
+// command is gone.
+//
+// exec.CommandContext kills the process it started, but a command that
+// forked (a shell running a pipeline, sandbox-exec's child) can leave a
+// grandchild holding the write end of the pipe. Reading until EOF then
+// waits for that grandchild, which can be forever — a sandboxed command
+// that hits a denied syscall is exactly the case that leaves one
+// behind. The deadline turns "waits forever" into "returns an error".
+const pipeGrace = 5 * time.Second
+
+// outputOf runs cmd and returns its combined output.
+func outputOf(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	cmd.WaitDelay = pipeGrace
+	return cmd.CombinedOutput()
 }
 
 // policyFor builds a Seatbelt policy for the profile.

@@ -2,10 +2,13 @@ package sandbox
 
 import (
 	"context"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAvailableMatchesPlatform verifies the availability probe agrees
@@ -107,21 +110,68 @@ func TestSandboxBlocksReadingDeniedPaths(t *testing.T) {
 }
 
 // TestSandboxBlocksNetwork verifies the network can be denied.
+//
+// The test is self-contained: it listens on a loopback port and asks nc
+// to connect to it, so the result does not depend on the machine having
+// a network, a DNS server, or an outside host that answers. The same
+// connection is made twice — once with network denied, once allowed —
+// so a failure to connect for any other reason cannot pass as a
+// successful denial.
+//
+// Every exec gets a deadline. A denied socket can hang the command
+// instead of failing it (the old version used ping with no timeout and
+// hung a CI run for ten minutes), and a hung test is worse than a
+// failing one: it says nothing about what went wrong.
 func TestSandboxBlocksNetwork(t *testing.T) {
 	if !Available() {
 		t.Skip("no sandbox available on this platform")
 	}
-	dir := t.TempDir()
-	profile := Profile{
-		WritePaths: []string{dir},
-		// Network denied.
-		AllowNetwork: false,
+	if _, err := exec.LookPath("nc"); err != nil {
+		t.Skip("nc is not available to probe the connection")
 	}
-	// A DNS lookup must fail without network access.
-	out, _, _ := Exec(context.Background(), "ping -c 1 -W 1 127.0.0.1", profile, dir)
-	// The sandbox refuses the socket, which is the signal to look for:
-	// ping still prints its statistics line.
-	if !strings.Contains(out, "Operation not permitted") {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split address: %v", err)
+	}
+
+	dir := t.TempDir()
+	probe := func(allowNetwork bool) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		out, _, err := Exec(ctx, "nc -z -w 2 "+host+" "+port, Profile{
+			WritePaths:   []string{dir},
+			AllowNetwork: allowNetwork,
+		}, dir)
+		if ctx.Err() != nil {
+			t.Fatalf("the probe did not finish within the deadline (allowNetwork=%v)", allowNetwork)
+		}
+		return out, err
+	}
+
+	// The control: with the network allowed the same probe succeeds, so
+	// a refused connection below is the sandbox's doing.
+	if out, err := probe(true); err != nil {
+		t.Fatalf("the control connection failed: %v (%q)", err, out)
+	}
+	out, err := probe(false)
+	if err == nil {
+		t.Errorf("the connection succeeded with the network denied: %q", out)
+	}
+	if strings.Contains(out, "succeeded") {
 		t.Errorf("the network was reachable: %q", out)
 	}
 }
