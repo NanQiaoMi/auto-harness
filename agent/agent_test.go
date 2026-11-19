@@ -706,3 +706,71 @@ func TestMutatingCallsStayOrdered(t *testing.T) {
 		}
 	}
 }
+
+// TestParallelCallsKeepPatchedArguments checks that a tool_call hook
+// rewriting the arguments of a read-only call is visible both to the
+// tool and in the history.
+//
+// The parallel path runs each call from its slice element; a copy would
+// leave the history with the model's original arguments while the tool
+// ran with the patched ones.
+func TestParallelCallsKeepPatchedArguments(t *testing.T) {
+	calls := []llm.ToolCall{
+		{ID: "p1", Name: "peek", Arguments: json.RawMessage(`{"v":"a"}`)},
+		{ID: "p2", Name: "peek", Arguments: json.RawMessage(`{"v":"b"}`)},
+	}
+	provider := &parallelProvider{calls: calls}
+	bus := ext.NewBus()
+	reg := tools.NewRegistry()
+	var mu sync.Mutex
+	seen := map[string]string{}
+	_ = reg.Register(&tools.Tool{
+		Name: "peek", ReadOnly: true, Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			var parsed struct{ V string }
+			_ = json.Unmarshal(args, &parsed)
+			mu.Lock()
+			seen[callID] = parsed.V
+			mu.Unlock()
+			return tools.Result{Content: "v=" + parsed.V}, nil
+		},
+	})
+	// The hook appends "-patched" to every read.
+	bus.On(ext.EventToolCall, func(e *ext.Event) error {
+		if e.ToolCall == nil {
+			return nil
+		}
+		var parsed struct{ V string }
+		if err := json.Unmarshal(e.ToolCall.Arguments, &parsed); err != nil {
+			return nil
+		}
+		e.ToolCall.Arguments = json.RawMessage(`{"v":"` + parsed.V + `-patched"}`)
+		return nil
+	})
+	ag := New(Config{Provider: provider, Model: "test-model", MaxTurns: 4}, bus, reg)
+
+	if _, err := ag.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if seen["p1"] != "a-patched" || seen["p2"] != "b-patched" {
+		t.Errorf("the tool saw %v", seen)
+	}
+	// The assistant message in the history is what a later request
+	// replays, so it must carry the arguments the tool actually ran
+	// with.
+	var checked int
+	for _, m := range ag.History() {
+		if m.Role != llm.RoleAssistant {
+			continue
+		}
+		for _, call := range m.ToolCalls {
+			checked++
+			if !strings.Contains(string(call.Arguments), "-patched") {
+				t.Errorf("history call %s has arguments %s", call.ID, call.Arguments)
+			}
+		}
+	}
+	if checked != 2 {
+		t.Fatalf("checked %d calls, want 2", checked)
+	}
+}
