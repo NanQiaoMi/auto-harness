@@ -1146,8 +1146,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) []ll
 			go func() {
 				defer wg.Done()
 				defer func() { <-limit }()
-				call := batch[j]
-				results[j] = a.executeTool(ctx, &call)
+				// &batch[j] is &calls[i+j], so an argument patched
+				// by a hook is visible in the history entry, exactly
+				// as in the serial path.
+				results[j] = a.executeTool(ctx, &batch[j])
 			}()
 		}
 		wg.Wait()
