@@ -1233,7 +1233,7 @@ REPL 是给人用的。要把 harness 嵌进 IDE、脚本（任何语言）或�
 | 记录 | 形状 | 说明 |
 |------|------|------|
 | 响应 | `{"id":"…","type":"response","command":"…","success":true,"data":{…}}` | 回答一条命令；`error` 说明失败原因 |
-| 事件 | `{"type":"…","data":{…}}` | 会话活动：`agent_start` / `turn_start` / `message_update` / `tool_execution_start` / `request_start` / `retry` / `agent_end` / `agent_before_settle` / `agent_settled` … |
+| 事件 | `{"type":"…","data":{…}}` | 会话活动：`agent_start` / `turn_start` / `message_update` / `tool_execution_start` / `request_start` / `retry` / `agent_end` / `agent_before_settle` / `agent_settled` …；`reason` 说明原因（`retry` 是错误文本，会话事件是 `new` / `fork` / `reload`），`retry` 另带 `attempt` / `maxAttempts` / `delayMs` |
 
 命令清单：
 

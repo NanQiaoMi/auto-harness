@@ -820,6 +820,11 @@ func (s *Server) emit(data map[string]any) {
 // fields, without the ones the harness keeps for itself.
 func (s *Server) emitEvent(e *ext.Event) {
 	data := map[string]any{"type": string(e.Type)}
+	if e.Reason != "" {
+		// retry carries the failure; the session events carry what
+		// asked for the operation ("new", "fork", "reload").
+		data["reason"] = e.Reason
+	}
 	if e.Text != "" {
 		data["text"] = e.Text
 	}
