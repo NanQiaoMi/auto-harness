@@ -529,7 +529,9 @@ input → before_agent_start → agent_start → turns → agent_end
 **重试**只针对一次模型请求。判定照抄 pi 的思路，但用一张正则表而不是错误类型：
 **不可重试的判定优先**——额度耗尽、账单、鉴权失败、模型不存在、上下文超长这些
 再试一次也是同样的结果；其余命中限流（429 / overloaded）、服务端故障（5xx）、传输
-中断（ECONNRESET / unexpected EOF / 流被打断）的才重试。退避是
+中断（ECONNRESET / 裸 `EOF` / unexpected EOF / 流被打断）的才重试——裸 `EOF` 是网关
+在响应之前把连接掐了，`net/http` 报成 `Post "…": EOF`，和正常结束流不是一回事（正常
+结束在 `streamOnce` 里是 `io.EOF`，算成功，到不了分类器）。退避是
 `base * 2^(attempt-1)` 并封顶（默认 1s 起、60s 封顶），`max_retries` 为负即关闭。
 一个关键约束：**只有一段内容都没流出去时才重试**。一旦 delta 已经开始进转录，第二
 次尝试会把同一句话打印两遍，所以中途断流直接报错而不是重试。每次尝试都会发
