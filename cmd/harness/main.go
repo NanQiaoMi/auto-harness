@@ -29,7 +29,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/tools"
 )
 
-const version = "0.1.5"
+const version = "0.1.6"
 
 var errExitREPL = errors.New("exit requested")
 
