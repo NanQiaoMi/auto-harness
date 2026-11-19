@@ -727,6 +727,9 @@ ext.SetDelegation(e, id, parent, workspace)
 | 上下文策略 | `api.UseContextPolicy(build)` | 内核的预算/自动压缩/artifact 外置是最内层，策略包在它外面；策略可以改写消息、改结果，也可以完全忽略 `next` 自己来 |
 | 工具呈现 | `api.RegisterToolRenderer(resolver)` | 任何工具（包括别人的 MCP 工具）怎么显示 |
 
+这三层都要求返回 Go 值（`llm.Provider`、builder、渲染器），所以只有进程内扩展能注册；
+进程扩展跨进程拿不到它们，它能提供的可替换点是工具、命令、hook 和事件。
+
 上下文策略的语义值得说清楚：`UseContextPolicy` 收到的 `next` 是**它下面所有层**合成
 出来的 builder，所以一个策略可以选择"先做我的事再交给内核"（`next.Build`）、"只看一眼
 结果"（先 `next.Build` 再改返回值），或者"完全接管"（根本不调 `next`）。多个策略按
