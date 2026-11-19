@@ -251,6 +251,10 @@ func main() {
 	registry := tools.NewRegistry()
 	commands := ext.NewCommandRegistry()
 	api := ext.NewAPI(bus, registry, commands)
+	// The extension API can register wire protocols and models, so a
+	// protocol the kernel does not compile in still routes like any
+	// built-in one.
+	api.Models = llmReg
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -467,6 +471,10 @@ func main() {
 		},
 	}, bus, registry)
 	ag.Session = sess
+	// Extension-registered context policies wrap the kernel's builder.
+	// The hook is read on every request, so a hot reload takes effect
+	// without rebuilding the agent.
+	ag.ContextPolicy = api.ContextBuilder
 	if !*noGitCheckpoints {
 		ag.Checkpointer = checkpointMgr
 		if _, created, err := checkpointMgr.Create(ctx, "session start",

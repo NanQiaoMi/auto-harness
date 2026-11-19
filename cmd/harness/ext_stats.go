@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/NanQiaoMi/auto-harness/ext"
@@ -20,7 +21,10 @@ func exampleExtensions() []ext.Extension {
 
 func statsExtension() ext.Extension {
 	return ext.Named("stats", func(api *ext.API) error {
+		// Parallel read-only tool calls mean the tool events can fire
+		// from several goroutines at once, so the counters are guarded.
 		var (
+			mu         sync.Mutex
 			toolCalls  int
 			toolErrors int
 			userMsgs   int
@@ -29,6 +33,8 @@ func statsExtension() ext.Extension {
 		)
 
 		api.On(ext.EventToolExecutionEnd, func(e *ext.Event) error {
+			mu.Lock()
+			defer mu.Unlock()
 			toolCalls++
 			if e.ToolResult != nil && e.ToolResult.IsError {
 				toolErrors++
@@ -36,14 +42,20 @@ func statsExtension() ext.Extension {
 			return nil
 		})
 		api.On(ext.EventAgentStart, func(e *ext.Event) error {
+			mu.Lock()
+			defer mu.Unlock()
 			userMsgs++
 			return nil
 		})
 		api.On(ext.EventTurnStart, func(e *ext.Event) error {
+			mu.Lock()
+			defer mu.Unlock()
 			turns++
 			return nil
 		})
 		api.On(ext.EventAgentEnd, func(e *ext.Event) error {
+			mu.Lock()
+			defer mu.Unlock()
 			usage.in += e.Usage.InputTokens
 			usage.out += e.Usage.OutputTokens
 			return nil
@@ -52,6 +64,8 @@ func statsExtension() ext.Extension {
 		api.RegisterCommand("stats", &ext.Command{
 			Description: "show session statistics (from the stats extension)",
 			Handler: func(ctx context.Context, args string) error {
+				mu.Lock()
+				defer mu.Unlock()
 				fmt.Printf("user inputs: %d, turns: %d, tool calls: %d (%d errors), tokens: %d in / %d out\n",
 					userMsgs, turns, toolCalls, toolErrors, usage.in, usage.out)
 				return nil

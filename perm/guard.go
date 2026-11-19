@@ -137,6 +137,14 @@ type Guard struct {
 	blocked int
 	// asked counts the calls that needed confirmation.
 	asked int
+
+	// askMu serializes the questions.
+	//
+	// Read-only tool calls run in parallel, so two of them can reach
+	// the tool_call hook at once. A question asks the user on the one
+	// terminal they share, and both would read from the same line
+	// reader: the second would take the answer meant for the first.
+	askMu sync.Mutex
 }
 
 // NewGuard creates a guard over a rule set.
@@ -217,7 +225,11 @@ func (g *Guard) check(e *ext.Event) {
 	if approver == nil {
 		approver = DenyApprover{}
 	}
+	// One question at a time: the approver reads the terminal, and a
+	// second question would take the first one's answer.
+	g.askMu.Lock()
 	allowed, err := approver.Approve(context.Background(), call, rule)
+	g.askMu.Unlock()
 	if err != nil {
 		e.Block = true
 		e.BlockReason = "permission check failed: " + err.Error()

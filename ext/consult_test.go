@@ -1,6 +1,7 @@
 package ext
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -534,3 +535,103 @@ while True:
         # real extension that predates the consult channel.
         send({"id": mid, "error": {"code": -32601, "message": "unknown method: " + method}})
 `
+
+// pythonCommandExtensionScript offers a slash command.
+const pythonCommandExtensionScript = `
+import json, sys
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    line = line.strip()
+    if not line:
+        return read()
+    return json.loads(line)
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+MANIFEST = {
+    "name": "greeter",
+    "description": "adds a slash command",
+    "commands": [{"name": "greet", "description": "say hello"}],
+}
+
+while True:
+    try:
+        msg = read()
+    except Exception:
+        break
+    if msg is None:
+        break
+    method = msg.get("method", "")
+    mid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "manifest":
+        send({"id": mid, "result": MANIFEST})
+    elif method == "command.execute":
+        send({"id": mid, "result": {"text": "hello " + (params.get("args") or "world")}})
+    elif method == "shutdown":
+        send({"id": mid, "result": {}})
+        break
+`
+
+// TestProcessExtensionCanProvideACommand checks that a process
+// extension can offer a slash command.
+//
+// Before this, a Python extension could only provide tools and veto
+// events; a command — something the user runs themselves — needed a Go
+// extension. The capability gate is separate, so a plugin has to ask
+// for it explicitly.
+func TestProcessExtensionCanProvideACommand(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "greeter.py")
+	writeFile(t, script, pythonCommandExtensionScript)
+
+	bus := NewBus()
+	commands := NewCommandRegistry()
+	api := NewAPI(bus, tools.NewRegistry(), commands)
+
+	pe := NewProcessExtension("python3", script)
+	if err := pe.Setup(api); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	defer pe.Stop()
+
+	cmd, ok := commands.Get("greet")
+	if !ok {
+		t.Fatalf("the command was not registered: %v", commands.List())
+	}
+	if cmd.Description != "say hello" {
+		t.Errorf("description = %q", cmd.Description)
+	}
+	// The handler prints the extension's text for the user. It writes
+	// to stdout, so the test only asserts that the round trip succeeds:
+	// a transport failure would come back as an error.
+	if err := cmd.Handler(context.Background(), "there"); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+}
+
+// TestProcessExtensionCommandNeedsTheCapability checks the gate.
+func TestProcessExtensionCommandNeedsTheCapability(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "greeter.py")
+	writeFile(t, script, pythonCommandExtensionScript)
+
+	bus := NewBus()
+	api := NewAPI(bus, tools.NewRegistry(), NewCommandRegistry())
+
+	pe := NewProcessExtension("python3", script)
+	// Only the tools capability: a manifest offering commands must be
+	// refused rather than silently ignored.
+	pe.Capabilities = []string{CapabilityTools}
+	err := pe.Setup(api)
+	if err == nil {
+		pe.Stop()
+		t.Fatal("a command was registered without the commands capability")
+	}
+	if !strings.Contains(err.Error(), CapabilityCommands) {
+		t.Errorf("error = %v, want it to name the capability", err)
+	}
+}

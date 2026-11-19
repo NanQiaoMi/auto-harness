@@ -45,6 +45,10 @@ const (
 	MethodManifest = "manifest"
 	// MethodToolExecute runs a tool the extension registered.
 	MethodToolExecute = "tool.execute"
+	// MethodCommandExecute runs a slash command the extension
+	// registered. The extension answers with the text to show the
+	// user, or an error.
+	MethodCommandExecute = "command.execute"
 	// MethodShutdown asks the extension to exit cleanly.
 	MethodShutdown = "shutdown"
 	// MethodEvent is a notification from the extension.
@@ -67,6 +71,8 @@ type Manifest struct {
 	Description string `json:"description,omitempty"`
 	// Tools lists the tools the extension provides.
 	Tools []ManifestTool `json:"tools,omitempty"`
+	// Commands lists the slash commands the extension provides.
+	Commands []ManifestCommand `json:"commands,omitempty"`
 	// Consults lists the event types the extension wants to be
 	// consulted about.
 	//
@@ -77,6 +83,23 @@ type Manifest struct {
 	// is simply not in the loop, so the harness must not treat its
 	// silence as a failure.
 	Consults []string `json:"consults,omitempty"`
+}
+
+// ManifestCommand describes one slash command offered by an extension
+// process.
+type ManifestCommand struct {
+	// Name is the command name without the leading slash.
+	Name string `json:"name"`
+	// Description is shown by /help.
+	Description string `json:"description,omitempty"`
+}
+
+// CommandParams are the arguments of command.execute.
+type CommandParams struct {
+	// Name is the command being run.
+	Name string `json:"name"`
+	// Args is the rest of the line the user typed.
+	Args string `json:"args,omitempty"`
 }
 
 // ManifestTool describes one tool offered by an extension process.

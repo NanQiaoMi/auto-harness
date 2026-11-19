@@ -33,6 +33,8 @@ type Registry struct {
 	headers map[string]string
 	// factory builds a live provider for a config. Tests replace it.
 	factory func(ProviderConfig) (Provider, error)
+	// protocols are wire protocols registered by extensions.
+	protocols map[string]func(ProviderConfig) (Provider, error)
 }
 
 // NewRegistry returns a registry seeded with the built-in catalog.
@@ -42,6 +44,7 @@ func NewRegistry() *Registry {
 		models:    map[string]Model{},
 		headers:   map[string]string{},
 		factory:   defaultFactory,
+		protocols: map[string]func(ProviderConfig) (Provider, error){},
 	}
 	for _, m := range Catalog {
 		r.models[m.ID] = m
@@ -76,6 +79,62 @@ func (r *Registry) RegisterProvider(c ProviderConfig) error {
 	cp := c
 	r.providers[c.Name] = &cp
 	return nil
+}
+
+// RegisterProtocol adds a wire protocol an extension can serve.
+//
+// Without this the registry only knows the protocols compiled into it,
+// so a new API shape means patching the kernel. With it an extension
+// registers a builder for a protocol name and models that declare that
+// protocol route to it.
+//
+// The builder is called once per provider the registry builds; it
+// receives the resolved config (base URL, key, name) and returns a
+// Provider. The returned function removes the registration, which is
+// what hot reload needs.
+func (r *Registry) RegisterProtocol(name string, build func(ProviderConfig) (Provider, error)) (unregister func(), err error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("llm: a protocol needs a name")
+	}
+	if build == nil {
+		return nil, fmt.Errorf("llm: protocol %q has no builder", name)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.protocols == nil {
+		r.protocols = map[string]func(ProviderConfig) (Provider, error){}
+	}
+	if _, exists := r.protocols[name]; exists {
+		return nil, fmt.Errorf("llm: protocol %q is already registered", name)
+	}
+	r.protocols[name] = build
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.protocols, name)
+	}, nil
+}
+
+// Protocols lists the wire protocols the registry can build.
+func (r *Registry) Protocols() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.protocols)+3)
+	names = append(names, "openai", "anthropic", "gemini")
+	for name := range r.protocols {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// protocolBuilder returns the builder for a protocol, if one is
+// registered by an extension.
+func (r *Registry) protocolBuilder(name string) (func(ProviderConfig) (Provider, error), bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	build, ok := r.protocols[name]
+	return build, ok
 }
 
 // Provider returns the config for a provider name.
@@ -164,6 +223,15 @@ func (r *Registry) Resolve(modelID, preferredProvider string) (ProviderConfig, e
 			return c, nil
 		}
 	}
+	// A model an extension added may name a protocol it also registered,
+	// with no provider entry of its own.
+	if hasModel {
+		for _, c := range providers {
+			if model.Protocol != "" && c.Protocol == model.Protocol {
+				return c, nil
+			}
+		}
+	}
 	return ProviderConfig{}, fmt.Errorf("llm: no provider configured for model %q", modelID)
 }
 
@@ -179,7 +247,15 @@ func (r *Registry) ProviderFor(modelID, preferredProvider string) (Provider, err
 	r.mu.RLock()
 	factory := r.factory
 	r.mu.RUnlock()
-	p, err := factory(cfg)
+	// An extension-registered protocol wins over the built-in factory:
+	// it is the only way to serve a wire format the kernel does not
+	// know, and a registered name is not a built-in one.
+	var p Provider
+	if build, ok := r.protocolBuilder(cfg.Protocol); ok {
+		p, err = build(cfg)
+	} else {
+		p, err = factory(cfg)
+	}
 	if err != nil {
 		return nil, err
 	}

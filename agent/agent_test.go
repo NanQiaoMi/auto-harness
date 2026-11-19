@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/NanQiaoMi/auto-harness/contextmgr"
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/tools"
@@ -522,3 +526,183 @@ var (
 	_ llm.Stream   = (*fakeStream)(nil)
 	_ llm.Provider = (*fakeProvider)(nil)
 )
+
+// TestContextPolicyWrapsTheRequest checks that the extension hook is
+// applied to every request, and that dropping it restores the kernel's
+// behavior.
+func TestContextPolicyWrapsTheRequest(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Message{{Content: "ok"}}}
+	ag, _, _ := newTestAgent(t, provider)
+
+	var sawSystem string
+	ag.ContextPolicy = func(next contextmgr.Builder) contextmgr.Builder {
+		return policyFunc(func(ctx context.Context, in contextmgr.Input) (contextmgr.Result, error) {
+			sawSystem = in.SystemPrompt
+			in.Messages = append(in.Messages, llm.Message{Role: llm.RoleUser, Content: "policy-note"})
+			if next == nil {
+				return contextmgr.Result{Messages: in.Messages}, nil
+			}
+			return next.Build(ctx, in)
+		})
+	}
+
+	if _, err := ag.Run(context.Background(), "hi"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sawSystem == "" {
+		t.Error("the policy did not see the system prompt")
+	}
+	// The injected message reached the provider.
+	req := provider.requests[0]
+	found := false
+	for _, m := range req.Messages {
+		if m.Content == "policy-note" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the policy's message did not reach the request: %#v", req.Messages)
+	}
+}
+
+// policyFunc adapts a function to contextmgr.Builder.
+type policyFunc func(context.Context, contextmgr.Input) (contextmgr.Result, error)
+
+func (f policyFunc) Build(ctx context.Context, in contextmgr.Input) (contextmgr.Result, error) {
+	return f(ctx, in)
+}
+
+// parallelProvider asks for a batch of tool calls in one message, then
+// answers.
+type parallelProvider struct {
+	calls []llm.ToolCall
+	mu    sync.Mutex
+	reqs  []llm.ChatRequest
+}
+
+func (p *parallelProvider) Name() string { return "parallel" }
+
+func (p *parallelProvider) Chat(ctx context.Context, req llm.ChatRequest) (llm.Stream, error) {
+	p.mu.Lock()
+	p.reqs = append(p.reqs, req)
+	n := len(p.reqs)
+	p.mu.Unlock()
+	msg := llm.Message{Role: llm.RoleAssistant, Content: "done"}
+	if n == 1 {
+		msg = llm.Message{Role: llm.RoleAssistant, ToolCalls: p.calls}
+	}
+	return newFakeStream(msg), nil
+}
+
+// TestReadOnlyCallsRunInParallel checks that independent reads overlap.
+//
+// Each read blocks until every other read has started. If the calls
+// were serialized the first one would wait forever, so a passing test
+// proves the overlap.
+func TestReadOnlyCallsRunInParallel(t *testing.T) {
+	const n = 3
+	var started sync.WaitGroup
+	started.Add(n)
+	allStarted := make(chan struct{})
+	go func() {
+		started.Wait()
+		close(allStarted)
+	}()
+
+	calls := make([]llm.ToolCall, n)
+	for i := range calls {
+		calls[i] = llm.ToolCall{ID: fmt.Sprintf("c%d", i), Name: "peek"}
+	}
+	provider := &parallelProvider{calls: calls}
+	bus := ext.NewBus()
+	reg := tools.NewRegistry()
+	if err := reg.Register(&tools.Tool{
+		Name:       "peek",
+		ReadOnly:   true,
+		Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			started.Done()
+			select {
+			case <-allStarted:
+			case <-time.After(5 * time.Second):
+				return tools.Result{}, fmt.Errorf("tool %s ran alone", callID)
+			}
+			return tools.Result{Content: "peeked:" + callID}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ag := New(Config{Provider: provider, Model: "test-model", MaxTurns: 4}, bus, reg)
+
+	if _, err := ag.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The results are in call order even though they finished together.
+	hist := ag.History()
+	var results []string
+	for _, m := range hist {
+		if m.Role == llm.RoleTool {
+			results = append(results, m.Content)
+		}
+	}
+	if len(results) != n {
+		t.Fatalf("tool results = %v", results)
+	}
+	for i, want := range []string{"peeked:c0", "peeked:c1", "peeked:c2"} {
+		if results[i] != want {
+			t.Errorf("result %d = %q, want %q", i, results[i], want)
+		}
+	}
+}
+
+// TestMutatingCallsStayOrdered checks that a write and the read after it
+// are not reordered.
+func TestMutatingCallsStayOrdered(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+
+	record := func(name string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, name)
+	}
+	calls := []llm.ToolCall{
+		{ID: "w", Name: "write-thing"},
+		{ID: "r", Name: "read-thing"},
+		{ID: "w2", Name: "write-thing"},
+	}
+	provider := &parallelProvider{calls: calls}
+	bus := ext.NewBus()
+	reg := tools.NewRegistry()
+	_ = reg.Register(&tools.Tool{
+		Name: "write-thing", Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			time.Sleep(10 * time.Millisecond)
+			record(callID)
+			return tools.Result{Content: callID}, nil
+		},
+	})
+	_ = reg.Register(&tools.Tool{
+		Name: "read-thing", ReadOnly: true, Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			record(callID)
+			return tools.Result{Content: callID}, nil
+		},
+	})
+	ag := New(Config{Provider: provider, Model: "test-model", MaxTurns: 4}, bus, reg)
+
+	if _, err := ag.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// A single read-only call is not parallelized, and the mutations on
+	// either side of it keep their order.
+	want := []string{"w", "r", "w2"}
+	if len(order) != len(want) {
+		t.Fatalf("execution order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("execution order = %v, want %v", order, want)
+		}
+	}
+}

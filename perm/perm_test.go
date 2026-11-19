@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/llm"
@@ -241,6 +243,57 @@ func TestGuardApprovesWithApprover(t *testing.T) {
 	}
 	if ev.Block {
 		t.Error("the call was blocked despite approval")
+	}
+}
+
+// TestGuardAsksOneCallAtATime checks that parallel read-only calls do
+// not ask two questions at once.
+//
+// They share one terminal, so a second question would read the answer
+// meant for the first. The approver here counts the calls in flight and
+// fails if it ever sees two.
+func TestGuardAsksOneCallAtATime(t *testing.T) {
+	bus := ext.NewBus()
+	api := ext.NewAPI(bus, tools.NewRegistry(), ext.NewCommandRegistry())
+
+	var inFlight, peak int
+	var mu sync.Mutex
+	guard := NewGuard(NewSet(ActionAsk), t.TempDir())
+	guard.Approver = ApproverFunc(func(ctx context.Context, call Call, rule *Rule) (bool, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return true, nil
+	})
+	if err := guard.Setup(api); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ev := &ext.Event{
+				Type:     ext.EventToolCall,
+				ToolCall: &llm.ToolCall{Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
+			}
+			_ = bus.Emit(ev)
+			if ev.Block {
+				t.Error("the call was blocked despite approval")
+			}
+		}()
+	}
+	wg.Wait()
+	if peak > 1 {
+		t.Errorf("%d questions were asked at once, want 1", peak)
 	}
 }
 

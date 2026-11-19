@@ -156,7 +156,7 @@ func ParseManifest(data []byte) (Manifest, error) {
 	seenCapabilities := map[string]bool{}
 	for i, capability := range m.Capabilities {
 		switch capability {
-		case ext.CapabilityTools, ext.CapabilityHooks, ext.CapabilityEvents:
+		case ext.CapabilityTools, ext.CapabilityHooks, ext.CapabilityEvents, ext.CapabilityCommands:
 		default:
 			return Manifest{}, fmt.Errorf("capabilities[%d] %q is not supported", i, capability)
 		}

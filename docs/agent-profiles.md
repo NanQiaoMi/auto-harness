@@ -193,10 +193,11 @@ Rules:
   resolution;
 - a path-like executable also resolves inside the plugin directory;
   use a bare command such as `python3` for a PATH lookup;
-- `capabilities` may contain `tools`, `hooks` and `events`. If omitted,
-  the plugin keeps the legacy unrestricted behavior. If present, it is
-  an explicit grant: the runtime rejects undeclared tools or consult
-  hooks and drops undeclared pushed events.
+- `capabilities` may contain `tools`, `commands`, `hooks` and `events`.
+  If omitted, the plugin keeps the legacy unrestricted behavior. If
+  present, it is an explicit grant: the runtime rejects undeclared tools
+  or consult hooks, refuses a manifest that offers commands, and drops
+  undeclared pushed events.
 - `supervisor` is optional and controls process recovery. If it is
   omitted, the plugin keeps the historical one-process lifetime.
   `restart` must be `never`, `on_failure` or `always`;

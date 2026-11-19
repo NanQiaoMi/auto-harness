@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NanQiaoMi/auto-harness/agent"
@@ -82,7 +83,15 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 
 	// The model streams into the transcript's pending line; the screen
 	// diffs it against the previous frame.
-	var streaming bool
+	// streaming is shared by every event handler, and tool calls can
+	// run in parallel, so the flag is guarded.
+	var streamingMu sync.Mutex
+	streaming := false
+	setStreaming := func(on bool) {
+		streamingMu.Lock()
+		streaming = on
+		streamingMu.Unlock()
+	}
 	bus.On(ext.EventMessageUpdate, func(e *ext.Event) error {
 		if ext.AgentID(e) != "" {
 			return nil
@@ -92,10 +101,12 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 				return nil
 			}
 		}
+		streamingMu.Lock()
 		if !streaming {
 			streaming = true
 			transcript.SetPending("")
 		}
+		streamingMu.Unlock()
 		transcript.SetPending(transcript.Pending() + e.Text)
 		screen.RequestRender()
 		return nil
@@ -110,7 +121,7 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 			transcript.Append(pending)
 			transcript.SetPending("")
 		}
-		streaming = false
+		setStreaming(false)
 		screen.RequestRender()
 		return nil
 	})

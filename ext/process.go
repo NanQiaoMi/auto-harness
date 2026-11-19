@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,10 @@ const (
 	CapabilityTools  = "tools"
 	CapabilityHooks  = "hooks"
 	CapabilityEvents = "events"
+	// CapabilityCommands lets the extension offer slash commands. It is
+	// separate from tools because a command is run by the user, not by
+	// the model, and it is the user's own typing that a command sees.
+	CapabilityCommands = "commands"
 )
 
 // ProcessExtension runs an external extension process and bridges it into
@@ -138,6 +143,9 @@ func (e *ProcessExtension) Setup(api *API) error {
 	if len(manifest.Consults) > 0 && !e.allows(CapabilityHooks) {
 		return fmt.Errorf("ext: %s: manifest consults events without the %q capability", e.Command, CapabilityHooks)
 	}
+	if len(manifest.Commands) > 0 && !e.allows(CapabilityCommands) {
+		return fmt.Errorf("ext: %s: manifest provides commands without the %q capability", e.Command, CapabilityCommands)
+	}
 	e.mu.Lock()
 	e.manifest = manifest
 	e.run = run
@@ -149,6 +157,15 @@ func (e *ProcessExtension) Setup(api *API) error {
 		if err := api.RegisterTool(tool); err != nil {
 			return fmt.Errorf("ext: %s: register tool %q: %w", e.Command, mt.Name, err)
 		}
+	}
+
+	// Register the remote commands as local slash commands.
+	for _, mc := range manifest.Commands {
+		if mc.Name == "" {
+			return fmt.Errorf("ext: %s: a command needs a name", e.Command)
+		}
+		cmd := e.remoteCommand(mc)
+		api.RegisterCommand(mc.Name, cmd)
 	}
 
 	// The extension may veto the events it is consulted about. The
@@ -345,6 +362,38 @@ func (e *ProcessExtension) remoteTool(mt ManifestTool) *tools.Tool {
 				return tools.Result{Content: err.Error(), IsError: true}, nil
 			}
 			return tools.Result{Content: out.Content, IsError: out.IsError}, nil
+		},
+	}
+}
+
+// remoteCommand wraps a remote slash command so running it proxies to
+// the child.
+//
+// The command is the user's own action, not the model's: it runs with
+// the arguments the user typed, and whatever the extension returns is
+// printed for them. It never touches the conversation, which is what
+// distinguishes a command from a tool.
+func (e *ProcessExtension) remoteCommand(mc ManifestCommand) *Command {
+	return &Command{
+		Description: mc.Description,
+		Handler: func(ctx context.Context, args string) error {
+			conn := e.connection()
+			if conn == nil {
+				return fmt.Errorf("extension process is not running")
+			}
+			var out struct {
+				Text string `json:"text"`
+			}
+			if err := conn.call(MethodCommandExecute, CommandParams{Name: mc.Name, Args: args}, &out); err != nil {
+				return err
+			}
+			if out.Text != "" {
+				fmt.Print(out.Text)
+				if !strings.HasSuffix(out.Text, "\n") {
+					fmt.Println()
+				}
+			}
+			return nil
 		},
 	}
 }

@@ -13,9 +13,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NanQiaoMi/auto-harness/contextmgr"
 	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/tools"
 )
+
+// ContextBuilder is the request-level context policy the agent runs
+// before every provider call (budgeting, compaction, artifact
+// externalization). It is contextmgr.Builder under a name the extension
+// API can use without dragging the whole package into extension code.
+type ContextBuilder = contextmgr.Builder
 
 // EventType identifies a hook. Names mirror pi's event names where the
 // concepts match.
@@ -373,14 +380,32 @@ type API struct {
 	Bus      *Bus
 	Tools    *tools.Registry
 	Commands *CommandRegistry
+	// Models is the provider registry. It is optional: an API built
+	// without one cannot register protocols.
+	Models *llm.Registry
 
 	// scopes tracks what each extension registered, so the manager can
 	// undo it on reload.
 	scopes scopeStack
+	// scopeSeq numbers the scopes, so each one has an identity.
+	scopeSeq int
 
 	mu       sync.Mutex
 	model    string
 	thinking bool
+	// contextPolicies are the context builders extensions registered,
+	// in registration order.
+	contextPolicies []contextPolicy
+}
+
+// contextPolicy is one registered request-level context policy.
+type contextPolicy struct {
+	// owner identifies the registering extension, so a reload can drop
+	// exactly its entries.
+	owner string
+	// build wraps the kernel's builder. It receives the builder the
+	// layers below it produced and returns the one to use.
+	build func(next ContextBuilder) ContextBuilder
 }
 
 // NewAPI creates an extension API wired to the given registries.
@@ -465,4 +490,92 @@ func (a *API) Thinking() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.thinking
+}
+
+// RegisterProtocol adds a wire protocol the model registry can build
+// (llm.Registry.RegisterProtocol).
+//
+// It is how an extension serves an API shape the kernel does not
+// compile in: register the protocol, register the models that use it,
+// and a model switch routes to it like any built-in one. The
+// registration is removed automatically on reload.
+func (a *API) RegisterProtocol(name string, build func(llm.ProviderConfig) (llm.Provider, error)) error {
+	if a.Models == nil {
+		return fmt.Errorf("ext: this harness has no model registry to register protocol %q on", name)
+	}
+	unregister, err := a.Models.RegisterProtocol(name, build)
+	if err != nil {
+		return err
+	}
+	if sc := a.currentScope(); sc != nil {
+		sc.recordUnsubscribe(unregister)
+	}
+	return nil
+}
+
+// RegisterModel adds model metadata (context window, output limit,
+// protocol) so the model can be selected and budgeted.
+func (a *API) RegisterModel(m llm.Model) {
+	if a.Models != nil {
+		a.Models.RegisterModel(m)
+	}
+}
+
+// UseContextPolicy registers a request-level context policy.
+//
+// The kernel's own builder (budgeting, automatic compaction, artifact
+// externalization) is the innermost layer. Each registered policy wraps
+// it: the policy may rewrite the messages before the kernel sees them,
+// replace the result afterwards, or skip the kernel entirely. The
+// policies run in registration order — the first registered is the
+// outermost and sees the request first.
+//
+// A policy is how an extension replaces compaction without patching the
+// agent: return a builder that ignores next and does its own thing.
+func (a *API) UseContextPolicy(build func(next ContextBuilder) ContextBuilder) error {
+	if build == nil {
+		return fmt.Errorf("ext: a context policy needs a builder")
+	}
+	owner := ""
+	if sc := a.currentScope(); sc != nil {
+		owner = sc.id
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.contextPolicies = append(a.contextPolicies, contextPolicy{owner: owner, build: build})
+	return nil
+}
+
+// ContextBuilder wraps the kernel's builder with every registered
+// policy. It returns next unchanged when no policy is registered, so the
+// agent keeps its default path.
+func (a *API) ContextBuilder(next ContextBuilder) ContextBuilder {
+	a.mu.Lock()
+	policies := append([]contextPolicy(nil), a.contextPolicies...)
+	a.mu.Unlock()
+	if len(policies) == 0 {
+		return next
+	}
+	for i := len(policies) - 1; i >= 0; i-- {
+		next = policies[i].build(next)
+	}
+	return next
+}
+
+// dropContextPolicies removes the policies an extension registered. It
+// is what a reload needs: a reloaded extension must not stack its
+// policy twice.
+func (a *API) dropContextPolicies(owner string) {
+	if owner == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	kept := a.contextPolicies[:0]
+	for _, p := range a.contextPolicies {
+		if p.owner != owner {
+			kept = append(kept, p)
+		}
+	}
+	a.contextPolicies = kept
 }

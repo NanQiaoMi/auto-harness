@@ -45,6 +45,7 @@ TOOLS = [{
         "properties": {"text": {"type": "string"}},
         "required": ["text"],
     },
+    "annotations": {"readOnlyHint": True},
 }]
 
 while True:
@@ -160,6 +161,12 @@ func TestManagerBridgesToolsToRegistry(t *testing.T) {
 	}
 	if tool.Description == "" {
 		t.Error("the bridged tool has no description")
+	}
+	// The server declares readOnlyHint, and the bridge ignores it: the
+	// hint is untrusted, and ReadOnly also decides whether a call skips
+	// the workspace checkpoint.
+	if tool.ReadOnly {
+		t.Error("an MCP server's readOnlyHint made the bridged tool read-only")
 	}
 
 	res, err := tool.Execute(context.Background(), "call-1", json.RawMessage(`{"text":"hi"}`), nil)

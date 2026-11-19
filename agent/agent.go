@@ -111,6 +111,13 @@ type Agent struct {
 	// Context sizes and compresses every provider request. It is
 	// optional: nil keeps the old behavior.
 	Context contextmgr.Builder
+	// ContextPolicy, when set, wraps Context before each use.
+	//
+	// It is how the extension API layers its registered policies over
+	// the kernel's builder. It is read on every request rather than
+	// captured once, so a hot reload that adds or drops a policy takes
+	// effect without rebuilding the agent.
+	ContextPolicy func(contextmgr.Builder) contextmgr.Builder
 	// Checkpointer snapshots the workspace before mutating tools.
 	Checkpointer Checkpointer
 
@@ -463,9 +470,7 @@ func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
 			}
 
 			// Execute requested tool calls (if any).
-			for i := range assistantMsg.ToolCalls {
-				call := assistantMsg.ToolCalls[i]
-				toolMsg := a.executeTool(ctx, &call)
+			for _, toolMsg := range a.executeToolCalls(ctx, assistantMsg.ToolCalls) {
 				a.append(toolMsg)
 			}
 
@@ -617,7 +622,14 @@ func (a *Agent) complete(ctx context.Context) (llm.Message, llm.Usage, ext.Reque
 
 	a.mu.Lock()
 	contextBuilder := a.Context
+	policy := a.ContextPolicy
 	a.mu.Unlock()
+	// The extension policies wrap the kernel's builder. A policy may
+	// replace compaction entirely, so it is applied here rather than
+	// baked in when the agent is built.
+	if policy != nil {
+		contextBuilder = policy(contextBuilder)
+	}
 	if contextBuilder != nil {
 		result, err := contextBuilder.Build(ctx, contextmgr.Input{
 			SystemPrompt:    cfg.SystemPrompt,
@@ -797,7 +809,11 @@ func (a *Agent) ContextStatus() (contextmgr.Status, bool) {
 
 	a.mu.Lock()
 	builder := a.Context
+	policy := a.ContextPolicy
 	a.mu.Unlock()
+	if policy != nil {
+		builder = policy(builder)
+	}
 	inspector, ok := builder.(contextmgr.Inspector)
 	if !ok {
 		return contextmgr.Status{}, false
@@ -1078,4 +1094,77 @@ func (a *Agent) emit(e *ext.Event) {
 	if err := a.Bus.Emit(e); err != nil && a.Logf != nil {
 		a.Logf("hook %s: %v", e.Type, err)
 	}
+}
+
+// maxParallelTools bounds how many read-only calls run at once.
+//
+// The cap is small on purpose: the point is to stop five independent
+// reads from being serialized, not to saturate the machine. A model
+// that asks for fifty reads should not open fifty file handles.
+const maxParallelTools = 4
+
+// executeToolCalls runs the calls of one assistant message and returns
+// their result messages, in the order the model asked for them.
+//
+// Consecutive read-only calls run in parallel: they cannot observe each
+// other's effects, so serializing them only costs time. Everything else
+// runs in order, because a mutating call and whatever follows it are
+// ordered — a write followed by a read of the same file must see the
+// write, and two mutations of one file must not interleave.
+//
+// The result order is the call order, never the completion order: the
+// tool messages answer specific call IDs, and a provider expects them
+// in the order its calls appeared.
+func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) []llm.Message {
+	out := make([]llm.Message, len(calls))
+
+	for i := 0; i < len(calls); {
+		if !a.canRunInParallel(&calls[i]) {
+			out[i] = a.executeTool(ctx, &calls[i])
+			i++
+			continue
+		}
+		// Take the longest run of read-only calls starting here.
+		end := i
+		for end < len(calls) && a.canRunInParallel(&calls[end]) {
+			end++
+		}
+		batch := calls[i:end]
+		if len(batch) == 1 {
+			out[i] = a.executeTool(ctx, &calls[i])
+			i = end
+			continue
+		}
+
+		results := make([]llm.Message, len(batch))
+		limit := make(chan struct{}, maxParallelTools)
+		var wg sync.WaitGroup
+		for j := range batch {
+			j := j
+			wg.Add(1)
+			limit <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-limit }()
+				call := batch[j]
+				results[j] = a.executeTool(ctx, &call)
+			}()
+		}
+		wg.Wait()
+		for j := range results {
+			out[i+j] = results[j]
+		}
+		i = end
+	}
+	return out
+}
+
+// canRunInParallel reports whether a call may run beside its neighbors.
+//
+// A tool is parallel-safe when it is registered and declared read-only.
+// An unknown tool is not: it is cheap to answer and running it beside
+// others would only make the error harder to reason about.
+func (a *Agent) canRunInParallel(call *llm.ToolCall) bool {
+	t, ok := a.Tools.Get(call.Name)
+	return ok && t.ReadOnly
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/llm"
@@ -24,6 +25,10 @@ type toolNotice struct {
 	registry *tools.Registry
 	// cwd is the working directory the calls run in.
 	cwd string
+	// mu serializes the writes. Read-only tool calls run in parallel, so
+	// two notices can be printed at the same time; without the lock
+	// their lines would interleave.
+	mu sync.Mutex
 }
 
 // call renders the notice of a tool call.
@@ -90,6 +95,8 @@ func (n *toolNotice) install(bus *ext.Bus, quiet bool, expanded func() bool, wri
 		if quiet || e.ToolCall == nil || ext.AgentID(e) != "" {
 			return nil
 		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
 		for _, line := range n.call(e.ToolCall) {
 			write(line)
 		}
@@ -103,6 +110,8 @@ func (n *toolNotice) install(bus *ext.Bus, quiet bool, expanded func() bool, wri
 		if len(lines) == 0 {
 			return nil
 		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
 		for _, line := range lines {
 			write(line)
 		}

@@ -1,6 +1,7 @@
 package ext
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/NanQiaoMi/auto-harness/tools"
@@ -12,6 +13,10 @@ import (
 // The scope is a stack on the API: Manager.Load pushes a scope before
 // calling Setup and pops it afterwards, so nested loads nest scopes.
 type scope struct {
+	// id identifies the scope, so a registration that is not an
+	// unsubscribe can still be dropped on reload (a context policy, for
+	// example, has no undo function).
+	id string
 	mu sync.Mutex
 	// unsubscribes remove event handlers the extension added.
 	unsubscribes []func()
@@ -42,6 +47,7 @@ func (s *scope) undo(api *API) {
 	for _, name := range cmdNames {
 		_ = api.Commands.Unregister(name)
 	}
+	api.dropContextPolicies(s.id)
 }
 
 // recordUnsubscribe adds an unsubscribe function to the scope.
@@ -76,7 +82,8 @@ type scopeStack struct {
 
 // pushScope starts a new registration scope and returns it.
 func (a *API) pushScope() *scope {
-	sc := &scope{}
+	a.scopeSeq++
+	sc := &scope{id: fmt.Sprintf("scope-%d", a.scopeSeq)}
 	a.scopes.mu.Lock()
 	a.scopes.scopes = append(a.scopes.scopes, sc)
 	a.scopes.mu.Unlock()

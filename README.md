@@ -636,6 +636,20 @@ ext.Named("my-ext", func(api *ext.API) error {
             return nil
         },
     })
+
+    // 4. 新的线上协议：内核不认识的 API 形状也能像内置的一样路由
+    api.RegisterProtocol("acme", func(c llm.ProviderConfig) (llm.Provider, error) {
+        return NewAcmeProvider(c.BaseURL, c.APIKey), nil
+    })
+    api.RegisterModel(llm.Model{
+        ID: "acme-1", Provider: "acme", Protocol: "acme",
+        ContextWindow: 128000, MaxOutput: 8192,
+    })
+
+    // 5. 请求级上下文策略：包装内核的预算/压缩，或者整个换掉
+    api.UseContextPolicy(func(next ext.ContextBuilder) ext.ContextBuilder {
+        return myPolicy{next: next}
+    })
     return nil
 })
 ```
@@ -677,6 +691,33 @@ ext.SetDelegation(e, id, parent, workspace)
 | `input` | 每次 Run 开始、prompt 交给模型之前 | 改 `e.Text` 改写；`e.Cancel` 表示扩展已处理这行，不跑 |
 | `user_bash` | `!` 快捷执行 shell 命令前 | `e.Block` + `e.BlockReason` 拦截；携带 `e.BashCommand` 和 `e.ExcludeFromContext` |
 
+### 可替换的内核层
+
+扩展不只是"加东西"：内核里有三处现在可以整体替换，而不必改内核代码。
+
+| 层 | 注册方法 | 替换的是什么 |
+|----|---------|-------------|
+| 线上协议 | `api.RegisterProtocol(name, build)` + `api.RegisterModel` | `llm.Registry` 不认识一种 API 形状时，扩展注册它，模型切换就路由过去 |
+| 上下文策略 | `api.UseContextPolicy(build)` | 内核的预算/自动压缩/artifact 外置是最内层，策略包在它外面；策略可以改写消息、改结果，也可以完全忽略 `next` 自己来 |
+| 工具呈现 | `api.RegisterToolRenderer(resolver)` | 任何工具（包括别人的 MCP 工具）怎么显示 |
+
+上下文策略的语义值得说清楚：`UseContextPolicy` 收到的 `next` 是**它下面所有层**合成
+出来的 builder，所以一个策略可以选择"先做我的事再交给内核"（`next.Build`）、"只看一眼
+结果"（先 `next.Build` 再改返回值），或者"完全接管"（根本不调 `next`）。多个策略按
+注册顺序从外到内，先注册的先看到请求。热重载时注册会被撤销，所以 `/reload` 不会让
+策略叠两层。
+
+工具并行：一次助手消息里的**连续只读工具调用**会并行执行（上限 4 个），有副作用的
+调用保持串行且与前后顺序不变——一次写和它后面的读必须看到写的效果。结果按调用顺序
+回填，不按完成顺序，因为工具消息回答的是具体的 call id。只读与否由工具的
+`ReadOnly` 声明决定，未知工具按"有副作用"处理——MCP 工具和进程扩展的工具都不算只读，
+哪怕服务器在 `annotations.readOnlyHint` 里自称如此：这个标记还决定"改动前要不要存
+工作区快照"，不能让被检查的一方自己声明。
+
+并行也把几处"以前只有一个 goroutine 碰"的状态变成了共享：工具通知的输出、TUI 的流式
+标志、扩展里的计数器都加了锁；权限层一次只问一个问题——两个并行调用同时弹确认框会
+读同一个终端，第二问会把第一问的答案吃掉。
+
 ### 进程扩展（任何语言）
 
 Go 没有内置脚本解释器，所以扩展也可以是**独立的子进程**：harness 通过 stdio 上的
@@ -692,10 +733,24 @@ harness → 扩展: {"id":2,"method":"tool.execute","params":{"name":"demo_echo"
 扩展 → harness: {"method":"event","params":{"event":"demo_started","text":"..."}}
 ```
 
-扩展握手时返回自己的 manifest（名字 + 工具列表），harness 把这些工具注册成和内置
-工具完全一样的工具；模型调用时，harness 把调用转发给子进程并把结果送回模型。扩展
-也可以主动推送事件到 harness 的事件总线，事件名用内置的或自定义的都行。注意这是
-**扩展往 harness 推**的方向，和下面 harness 主动发出的 `input` 事件是两回事。
+扩展握手时返回自己的 manifest（名字 + 工具 + 命令列表），harness 把这些工具注册成
+和内置工具完全一样的工具，把命令注册成斜杠命令；模型调用工具时 harness 把调用转发给
+子进程，用户敲命令时把整行参数转过去：
+
+```
+harness → 扩展: {"id":4,"method":"command.execute","params":{"name":"greet","args":"there"}}
+扩展 → harness: {"id":4,"result":{"text":"hello there"}}
+```
+
+命令和工具的区别是**谁在跑**：工具是模型决定调的，命令是用户自己敲的，所以命令拿到
+的是用户原文，返回的文本直接打给用户，不进入对话。扩展也可以主动推送事件到 harness
+的事件总线，事件名用内置的或自定义的都行。注意这是**扩展往 harness 推**的方向，和
+下面 harness 主动发出的 `input` 事件是两回事。
+
+进程扩展的能力按 manifest 声明授予，装成插件时由 `plugin.json` 的 `capabilities`
+决定：`tools`（提供工具）、`commands`（提供斜杠命令）、`hooks`（被 consult 询问）、
+`events`（推送事件）。没声明的能力被拒绝而不是静默忽略——一个 manifest 提供了工具却
+没拿到 `tools` 授权，加载直接失败。
 
 #### 反向通道：harness 问扩展
 
@@ -789,8 +844,9 @@ chmod +x examples/extensions/demo_extension.py
 清单不是第二套工具注册表：进程启动后的 `manifest` 响应仍是工具名、参数 schema 和
 consult 事件的唯一权威。`plugin.json` 负责稳定身份、启动和授权：未知字段/坏 schema
 拒绝；`cwd` 与路径型入口在 symlink 解析后仍必须留在插件目录内；`capabilities` 是
-显式授权（`tools` / `hooks` / `events`），比如只给了 `tools` 的插件不能注册 consult
-hook，推送的事件也会被丢弃。旧的可执行文件发现方式继续兼容。profile 的 `plugins`
+显式授权（`tools` / `commands` / `hooks` / `events`），比如只给了 `tools` 的插件不能
+注册 consult hook、manifest 里给了命令会直接加载失败，推送的事件也会被丢弃。旧的
+可执行文件发现方式继续兼容。profile 的 `plugins`
 按名字选择插件，未列出的插件不启动；`/plugins` 显示版本、来源和状态。
 
 `supervisor` 是可选**进程级恢复**，不是任务 checkpoint：子进程崩溃后从头启动，
@@ -1650,6 +1706,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 已完成的深化项：
 
+- **可替换的内核层与并行工具调用**（[ext/ext.go](ext/ext.go)、[llm/registry.go](llm/registry.go)、[agent/agent.go](agent/agent.go)）：从「扩展能加东西」走到「扩展能换掉内核的一层」。`api.RegisterProtocol` + `api.RegisterModel` 让一种内核不认识的线上协议像内置的一样路由——注册协议名和 builder，模型声明该协议，`/model` 切过去就由扩展服务；`api.UseContextPolicy` 把内核的预算/自动压缩/artifact 外置变成最内层，扩展注册的策略包在它外面，可以改写输入、改结果或整个接管（不调 `next` 就是不压缩），多策略按注册顺序从外到内，热重载撤销注册所以 `/reload` 不会叠两层；进程扩展补上 `commands` 能力和 `command.execute` 方法，任何语言的插件都能提供斜杠命令，不再只有 Go 扩展可以。工具循环也补了并行：一次助手消息里**连续的只读调用**并行执行（上限 4），有副作用的调用保持串行且顺序不变（写和它后面的读必须看到写的效果），结果按调用顺序而不是完成顺序回填。只读由工具的 `ReadOnly` 声明决定，未知工具按有副作用处理；并行也让工具通知、TUI 流式标志和示例扩展的计数器变成多 goroutine 共享，三处都加了锁，权限层则改成一次只问一个问题
 - **委派子代理与独立上下文**（[orchestrator/](orchestrator/)、[cmd/harness/subagents.go](cmd/harness/subagents.go)、[docs/subagents.md](docs/subagents.md)）：父模型用 `agent` 工具启动后台任务，每个任务拥有独立 session、上下文预算、摘要器、artifact 目录和工作区绑定工具；父上下文只收有界摘要，完整转录留在子会话。默认在 Git 仓库内创建 detached worktree，非 Git 目录回退 shared；成功 worktree 保留，需要人工检查或合入，不会自动丢弃用户改动。`max_concurrent` / `max_depth` / 单次超时 / 取消级联 / 原子 JSON 任务记录均已落地；重启将未完成任务标记为 `interrupted` 而不假装续跑。权限层按子代理 workspace 解析路径，后台无法弹父终端，未预批准的 ask 调用 fail-closed。REPL `/agents` 和 RPC `get_agents` / `get_agent` / `cancel_agent` 提供检查与控制
 - **内置 Git、逐步工作区回退与整回合撤销**（[gitkit/](gitkit/)、[docs/git-checkpoints.md](docs/git-checkpoints.md)）：Git 从“让模型跑 shell”变成内核工具。`git` 用参数数组直接执行，不经过 shell，支持 stdin、仓库内 workdir 和非交互环境；`checkpoint` 保存非忽略工作树、精确 index（含 merge 冲突 stage）、HEAD/分支/detached、普通 refs、stash 栈与 reflog。默认在每个修改型工具和用户 `!` / RPC `bash` 前自动快照，快照失败则拒绝执行；只读工具和只读 Git 子命令跳过。检查点记录所属 session、回合 ID 和会话锚点：`/rewind` 只恢复工作区，`/undo` 选择当前回合最早的快照，把工作区和会话 leaf 一起退回第一次修改之前，旧 assistant tool call 不会悬空；同一锚点下的不同分支靠回合 ID 区分，只读回合则只移动会话并明确警告。`restoreContext:true` 在 RPC 中提供同样语义，运行中的 prompt 结束前拒绝恢复与 `new_session`。恢复前先建独立 safety 检查点，所以 `/undo` 本身也能撤回，`/undo <safety-id>` 就是 redo；空选择器不会被 safety 快照带着向前跳。跨分支恢复会做 worktree 占用检查；恢复失败会尝试回滚到 safety，会话移动失败也会回滚工作区。边界明确：忽略文件、`.git/config`、hooks、`FETCH_HEAD`、非 stash reflog、submodule 工作树、未验证的 LFS 行为、进程内存、运行中的请求和工作区外副作用不在恢复范围；快照可能包含未跟踪文件里的密钥，镜像推送 `refs/harness/*` 会带走它们
 - **插件 registry、依赖解析与托管安装**（[plugins/](plugins/)、[cmd/harness/plugins_cli.go](cmd/harness/plugins_cli.go)）：插件从“手工拷贝目录”升级为可审计分发单元。registry 文档声明版本、artifact SHA-256 和依赖约束；解析器选最高兼容版本并支持回溯，安装器先把完整依赖图下载/校验/解包到 stage，再原子替换 `~/.harness/plugins/<name>`，最后写 `plugins.lock.json`。lock 记录版本、artifact digest、完整目录树 digest、来源、publisher、签名 key ID 和依赖；`-plugin-verify` 重算目录树、检查依赖版本并找出未入锁的托管插件，`-plugin-remove` 拒绝破坏仍被依赖的包。tar 解包拒绝绝对路径、目录穿越、链接、设备、重复路径和资源超限；远程 registry 仅 HTTPS（明文 HTTP 只给 loopback 开发），本地 registry 可离线使用

@@ -101,6 +101,12 @@ func (m *Manager) registerTool(server string, client *Client, t Tool) error {
 	if schema == nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
+	// ReadOnly stays false even when the server's annotations claim
+	// readOnlyHint: the hint is untrusted metadata, and the kernel uses
+	// ReadOnly for two things a server must not decide for itself —
+	// skipping the workspace checkpoint before a mutating call, and
+	// running a call beside its neighbors. A server that lied could
+	// mutate without a snapshot and race another call.
 	tool := &tools.Tool{
 		Name:        name,
 		Label:       t.Title,

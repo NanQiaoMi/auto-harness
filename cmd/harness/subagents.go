@@ -138,6 +138,11 @@ func (r *subagentRuntime) factory(ctx context.Context, task orchestrator.Task) (
 		},
 	}, r.bus, childRegistry)
 	ag.Session = sess
+	// A delegated agent shares the extension bus, so it shares the
+	// context policies too: a policy that injects project rules or
+	// replaces compaction must not silently stop applying one level
+	// down.
+	ag.ContextPolicy = r.parent.ContextPolicy
 	if r.checkpointsEnabled {
 		ag.Checkpointer = checkpointMgr
 	}
