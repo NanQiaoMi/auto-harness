@@ -774,3 +774,50 @@ func TestParallelCallsKeepPatchedArguments(t *testing.T) {
 		t.Fatalf("checked %d calls, want 2", checked)
 	}
 }
+
+// TestParallelCallsRespectTheCap checks that a long run of read-only
+// calls does not open every one at once.
+//
+// The cap is what keeps a model that asks for fifty reads from holding
+// fifty file handles; without it the batching would be unbounded.
+func TestParallelCallsRespectTheCap(t *testing.T) {
+	const n = maxParallelTools * 3
+	calls := make([]llm.ToolCall, n)
+	for i := range calls {
+		calls[i] = llm.ToolCall{ID: fmt.Sprintf("c%d", i), Name: "peek"}
+	}
+	provider := &parallelProvider{calls: calls}
+	bus := ext.NewBus()
+	reg := tools.NewRegistry()
+	var mu sync.Mutex
+	var inFlight, peak int
+	_ = reg.Register(&tools.Tool{
+		Name: "peek", ReadOnly: true, Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			mu.Lock()
+			inFlight++
+			if inFlight > peak {
+				peak = inFlight
+			}
+			mu.Unlock()
+			time.Sleep(20 * time.Millisecond)
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return tools.Result{Content: callID}, nil
+		},
+	})
+	ag := New(Config{Provider: provider, Model: "test-model", MaxTurns: 4}, bus, reg)
+
+	if _, err := ag.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if peak > maxParallelTools {
+		t.Errorf("%d calls ran at once, want at most %d", peak, maxParallelTools)
+	}
+	// The cap must not serialize everything either: with n > cap and
+	// every call sleeping, a fully serial run would never reach 2.
+	if peak < 2 {
+		t.Errorf("peak concurrency = %d, want at least 2", peak)
+	}
+}
