@@ -71,6 +71,11 @@ The task states are `queued`, `running`, `completed`, `failed`,
   tasks running until they are waited for or cancelled.
 - `wait` is a poll-friendly wait. A timeout returns the current snapshot
   with `timedOut: true`; it does not fail the task.
+- The parent's tool retry policy (`tool_max_retries`, `tool_retry_delay_ms`,
+  `retry_max_delay_ms`) is inherited: the same tools fail the same way one
+  level down. `max_run_tokens` is **not**: each child has its own spend, and
+  handing every child the parent's limit would multiply the allowance by the
+  number of children rather than bounding the tree.
 
 Follow-up prompts can be sent to a live, completed task. A task loaded
 from disk during a new harness process is history-only: it is shown in
