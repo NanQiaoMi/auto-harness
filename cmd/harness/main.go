@@ -41,7 +41,7 @@ func main() {
 		systemFlag       = flag.String("system", "", "override the system prompt")
 		maxTurns         = flag.Int("max-turns", 0, "cap on agent loop iterations (default 25)")
 		maxTokens        = flag.Int("max-tokens", 0, "cap on tokens per completion (provider default)")
-		maxRunTokens     = flag.Int("max-run-tokens", 0, "cap on tokens one run may spend, input plus output (default: no limit)")
+		maxRunTokens     = flag.Int("max-run-tokens", 0, "cap on tokens one run may spend, cached ones included (default: no limit)")
 		sessionFlag      = flag.String("session", "", "resume session ID")
 		listSessions     = flag.Bool("list-sessions", false, "list saved sessions and exit")
 		printMode        = flag.Bool("print", false, "one-shot mode: run the given prompt and exit")
