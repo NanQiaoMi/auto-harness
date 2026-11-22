@@ -910,3 +910,67 @@ func (p *firstCallBlocksProvider) Chat(ctx context.Context, req llm.ChatRequest)
 		{Type: llm.EventDone, Message: &msg},
 	}}, nil
 }
+
+func TestPromptCommandWithImages(t *testing.T) {
+	b64PNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	provider := &fakeProvider{responses: []llm.Message{
+		{Content: "first ok"},
+		{Content: "second ok"},
+	}}
+	server, _, _ := newTestServer(t, provider)
+	c := newClient(t, server)
+	defer c.close()
+
+	// 1. Inline base64 image with text message.
+	c.send(map[string]any{
+		"id":      "img-1",
+		"type":    CmdPrompt,
+		"message": "describe",
+		"images": []map[string]any{
+			{"data": b64PNG, "media_type": "image/png", "label": "dot.png"},
+		},
+	})
+	resp := c.response(CmdPrompt)
+	if resp["success"] != true {
+		t.Fatalf("prompt with base64 image failed: %v", resp)
+	}
+	c.settled()
+
+	// 2. Image-only prompt (empty message) with invalid image should fail cleanly,
+	// and valid image path should succeed.
+	c.send(map[string]any{
+		"id":      "img-bad",
+		"type":    CmdPrompt,
+		"message": "",
+		"images":  []map[string]any{{"data": "not-base64!!!"}},
+	})
+	badResp := c.response(CmdPrompt)
+	if badResp["success"] != false {
+		t.Fatalf("expected invalid image to fail, got %v", badResp)
+	}
+
+	c.send(map[string]any{
+		"id":      "img-2",
+		"type":    CmdPrompt,
+		"message": "",
+		"images":  []map[string]any{{"data": b64PNG}},
+	})
+	resp2 := c.response(CmdPrompt)
+	if resp2["success"] != true {
+		t.Fatalf("image-only prompt failed: %v", resp2)
+	}
+	c.settled()
+
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if len(provider.requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(provider.requests))
+	}
+	if len(provider.requests[0].Messages[0].Images) != 1 {
+		t.Errorf("req[0] missing image")
+	}
+	last := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if len(last.Images) != 1 {
+		t.Errorf("req[1] missing image: %+v", last)
+	}
+}
