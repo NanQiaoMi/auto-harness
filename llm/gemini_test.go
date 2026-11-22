@@ -83,3 +83,50 @@ func TestGeminiStreamTextAndToolCall(t *testing.T) {
 		t.Errorf("tools = %+v", gotBody["tools"])
 	}
 }
+
+func TestGeminiMultimodalWirePayload(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n")
+	}))
+	defer srv.Close()
+
+	img, err := ImageFromBytes(makePNG(t, 4, 4), "image/png", "shot.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewGeminiProvider("k", srv.URL)
+	stream, err := p.Chat(context.Background(), ChatRequest{
+		Model: "gemini-4-argon",
+		Messages: []Message{
+			{Role: RoleUser, Content: "look", Images: []Image{img}},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "fc1", Name: "read", Arguments: json.RawMessage(`{}`)}}},
+			{Role: RoleTool, ToolCallID: "fc1", Content: "done", Images: []Image{img}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.Close()
+
+	contents := got["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("contents = %d, want 3", len(contents))
+	}
+	userParts := contents[0].(map[string]any)["parts"].([]any)
+	if len(userParts) != 2 {
+		t.Fatalf("userParts = %d, want 2", len(userParts))
+	}
+	inline := userParts[1].(map[string]any)["inlineData"].(map[string]any)
+	if inline["mimeType"] != "image/png" || inline["data"] == "" {
+		t.Errorf("inlineData = %#v", inline)
+	}
+	toolParts := contents[2].(map[string]any)["parts"].([]any)
+	if len(toolParts) != 2 || toolParts[1].(map[string]any)["inlineData"] == nil {
+		t.Errorf("toolParts = %#v", toolParts)
+	}
+}

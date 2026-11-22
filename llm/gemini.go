@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,8 +58,14 @@ type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
 type geminiPart struct {
-	Text string `json:"text,omitempty"`
+	Text       string            `json:"text,omitempty"`
+	InlineData *geminiInlineData `json:"inlineData,omitempty"`
 	// FunctionCall requests a tool invocation.
 	FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
 	// FunctionResponse carries a tool result back to the model.
@@ -121,9 +128,20 @@ func (p *GeminiProvider) Chat(ctx context.Context, req ChatRequest) (Stream, err
 	for _, m := range req.Messages {
 		switch m.Role {
 		case RoleUser:
+			parts := make([]geminiPart, 0, len(m.Images)+1)
+			if m.Content != "" || len(m.Images) == 0 {
+				parts = append(parts, geminiPart{Text: m.Content})
+			}
+			for _, img := range m.Images {
+				raw, err := img.Bytes()
+				if err != nil {
+					return nil, err
+				}
+				parts = append(parts, geminiImagePart(img, raw))
+			}
 			wire.Contents = append(wire.Contents, geminiContent{
 				Role:  "user",
-				Parts: []geminiPart{{Text: m.Content}},
+				Parts: parts,
 			})
 		case RoleAssistant:
 			parts := []geminiPart{}
@@ -143,16 +161,25 @@ func (p *GeminiProvider) Chat(ctx context.Context, req ChatRequest) (Stream, err
 				wire.Contents = append(wire.Contents, geminiContent{Role: "model", Parts: parts})
 			}
 		case RoleTool:
+			parts := make([]geminiPart, 0, len(m.Images)+1)
+			parts = append(parts, geminiPart{FunctionResponse: &geminiFunctionResponse{
+				ID:   m.ToolCallID,
+				Name: m.ToolCallID,
+				Response: map[string]any{
+					"content": m.Content,
+					"isError": m.IsError,
+				},
+			}})
+			for _, img := range m.Images {
+				raw, err := img.Bytes()
+				if err != nil {
+					return nil, err
+				}
+				parts = append(parts, geminiImagePart(img, raw))
+			}
 			wire.Contents = append(wire.Contents, geminiContent{
-				Role: "user",
-				Parts: []geminiPart{{FunctionResponse: &geminiFunctionResponse{
-					ID:   m.ToolCallID,
-					Name: m.ToolCallID,
-					Response: map[string]any{
-						"content": m.Content,
-						"isError": m.IsError,
-					},
-				}}},
+				Role:  "user",
+				Parts: parts,
 			})
 		}
 	}
@@ -221,6 +248,15 @@ func (p *GeminiProvider) Chat(ctx context.Context, req ChatRequest) (Stream, err
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	return &geminiStream{body: resp.Body, scanner: scanner}, nil
+}
+
+func geminiImagePart(img Image, raw []byte) geminiPart {
+	return geminiPart{
+		InlineData: &geminiInlineData{
+			MimeType: img.MediaType,
+			Data:     base64.StdEncoding.EncodeToString(raw),
+		},
+	}
 }
 
 type geminiStream struct {

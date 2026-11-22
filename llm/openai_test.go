@@ -216,3 +216,60 @@ func TestOpenAIChunkWithBothReasoningAndText(t *testing.T) {
 		t.Errorf("msg.Content = %q, want the text of the chunk", msg.Content)
 	}
 }
+
+func TestOpenAIMultimodalWirePayload(t *testing.T) {
+	var got openAIRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	img, err := ImageFromBytes(makePNG(t, 4, 4), "image/png", "shot.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewOpenAIProvider("k", srv.URL)
+	stream, err := p.Chat(context.Background(), ChatRequest{
+		Model: "gpt-5.2",
+		Messages: []Message{
+			{Role: RoleUser, Content: "plain text"},
+			{Role: RoleUser, Content: "see this", Images: []Image{img}},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Name: "read", Arguments: json.RawMessage(`{"path":"shot.png"}`)}}},
+			{Role: RoleTool, ToolCallID: "c1", Content: "image read", Images: []Image{img}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.Close()
+
+	if len(got.Messages) != 5 {
+		t.Fatalf("messages = %d, want 5 (tool image adds follow-up user msg)", len(got.Messages))
+	}
+	// Plain text user message remains a JSON string.
+	if s, ok := got.Messages[0].Content.(string); !ok || s != "plain text" {
+		t.Errorf("msg[0] content = %T %#v, want string", got.Messages[0].Content, got.Messages[0].Content)
+	}
+	// Image user message is an array of parts.
+	parts, ok := got.Messages[1].Content.([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("msg[1] content = %T %#v", got.Messages[1].Content, got.Messages[1].Content)
+	}
+	imgPart := parts[1].(map[string]any)
+	if imgPart["type"] != "image_url" {
+		t.Errorf("part[1] = %#v", imgPart)
+	}
+	urlObj := imgPart["image_url"].(map[string]any)
+	if !strings.HasPrefix(urlObj["url"].(string), "data:image/png;base64,") {
+		t.Errorf("image_url = %v", urlObj["url"])
+	}
+	// Tool result message stays text, followed by user image message.
+	if got.Messages[3].Role != "tool" || got.Messages[4].Role != "user" {
+		t.Errorf("roles 3,4 = %s,%s", got.Messages[3].Role, got.Messages[4].Role)
+	}
+}

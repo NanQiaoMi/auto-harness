@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,15 +59,22 @@ type anthropicMessage struct {
 	Content []anthropicBlock `json:"content"`
 }
 
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
 type anthropicBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
+	Type      string                `json:"type"`
+	Text      string                `json:"text,omitempty"`
+	Source    *anthropicImageSource `json:"source,omitempty"`
+	ID        string                `json:"id,omitempty"`
+	Name      string                `json:"name,omitempty"`
+	Input     json.RawMessage       `json:"input,omitempty"`
+	ToolUseID string                `json:"tool_use_id,omitempty"`
+	Content   any                   `json:"content,omitempty"`
+	IsError   bool                  `json:"is_error,omitempty"`
 }
 
 type anthropicTool struct {
@@ -129,7 +137,16 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (Stream, 
 	for _, m := range req.Messages {
 		switch m.Role {
 		case RoleUser:
-			wire.Messages = appendMessage(wire.Messages, "user", anthropicBlock{Type: "text", Text: m.Content})
+			if len(m.Images) == 0 || m.Content != "" {
+				wire.Messages = appendMessage(wire.Messages, "user", anthropicBlock{Type: "text", Text: m.Content})
+			}
+			for _, img := range m.Images {
+				raw, err := img.Bytes()
+				if err != nil {
+					return nil, err
+				}
+				wire.Messages = appendMessage(wire.Messages, "user", anthropicImageBlock(img, raw))
+			}
 		case RoleAssistant:
 			blocks := []anthropicBlock{}
 			if m.Content != "" {
@@ -147,10 +164,25 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (Stream, 
 				wire.Messages = appendMessage(wire.Messages, "assistant", b)
 			}
 		case RoleTool:
+			var content any = m.Content
+			if len(m.Images) > 0 {
+				blocks := make([]anthropicBlock, 0, len(m.Images)+1)
+				if m.Content != "" {
+					blocks = append(blocks, anthropicBlock{Type: "text", Text: m.Content})
+				}
+				for _, img := range m.Images {
+					raw, err := img.Bytes()
+					if err != nil {
+						return nil, err
+					}
+					blocks = append(blocks, anthropicImageBlock(img, raw))
+				}
+				content = blocks
+			}
 			wire.Messages = appendMessage(wire.Messages, "user", anthropicBlock{
 				Type:      "tool_result",
 				ToolUseID: m.ToolCallID,
-				Content:   m.Content,
+				Content:   content,
 				IsError:   m.IsError,
 			})
 		}
@@ -215,6 +247,17 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (Stream, 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	return &anthropicStream{body: resp.Body, scanner: scanner}, nil
+}
+
+func anthropicImageBlock(img Image, raw []byte) anthropicBlock {
+	return anthropicBlock{
+		Type: "image",
+		Source: &anthropicImageSource{
+			Type:      "base64",
+			MediaType: img.MediaType,
+			Data:      base64.StdEncoding.EncodeToString(raw),
+		},
+	}
 }
 
 // appendMessage merges block into the last message when it has the same

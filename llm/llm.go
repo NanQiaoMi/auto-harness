@@ -33,6 +33,8 @@ type ToolCall struct {
 type Message struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content,omitempty"`
+	// Images carries image attachments on user or tool messages.
+	Images []Image `json:"images,omitempty"`
 	// ToolCalls is set on assistant messages requesting tool invocations.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID links a RoleTool message to the call it answers.

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,7 +55,7 @@ type openAIStreamOpts struct {
 
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Content    any              `json:"content,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
@@ -115,7 +116,15 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (Stream, err
 	for _, m := range req.Messages {
 		switch m.Role {
 		case RoleUser:
-			wire.Messages = append(wire.Messages, openAIMessage{Role: "user", Content: m.Content})
+			if len(m.Images) == 0 {
+				wire.Messages = append(wire.Messages, openAIMessage{Role: "user", Content: m.Content})
+				continue
+			}
+			parts, err := openAIImageParts(m.Content, m.Images)
+			if err != nil {
+				return nil, err
+			}
+			wire.Messages = append(wire.Messages, openAIMessage{Role: "user", Content: parts})
 		case RoleAssistant:
 			om := openAIMessage{Role: "assistant", Content: m.Content}
 			for _, tc := range m.ToolCalls {
@@ -131,6 +140,15 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (Stream, err
 				Content:    m.Content,
 				ToolCallID: m.ToolCallID,
 			})
+			if len(m.Images) > 0 {
+				// OpenAI Chat Completions rejects image blocks on role:"tool",
+				// so attach tool images in an immediately following user turn.
+				parts, err := openAIImageParts("", m.Images)
+				if err != nil {
+					return nil, err
+				}
+				wire.Messages = append(wire.Messages, openAIMessage{Role: "user", Content: parts})
+			}
 		}
 	}
 	for _, t := range req.Tools {
@@ -192,6 +210,29 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (Stream, err
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	return &openAIStream{body: resp.Body, scanner: scanner}, nil
+}
+
+func openAIImageParts(text string, images []Image) ([]map[string]any, error) {
+	parts := make([]map[string]any, 0, len(images)+1)
+	if text != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": text,
+		})
+	}
+	for _, img := range images {
+		raw, err := img.Bytes()
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, map[string]any{
+			"type": "image_url",
+			"image_url": map[string]any{
+				"url": fmt.Sprintf("data:%s;base64,%s", img.MediaType, base64.StdEncoding.EncodeToString(raw)),
+			},
+		})
+	}
+	return parts, nil
 }
 
 type openAIStream struct {
