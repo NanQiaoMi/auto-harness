@@ -25,6 +25,21 @@ import (
 	"strings"
 )
 
+// SchemaVersion is the wire protocol schema version emitted by the
+// RPC server and accepted from clients. Clients that omit
+// schema_version are treated as v1 ("1.0") for backward compatibility.
+const SchemaVersion = "1.0"
+
+// ValidateSchemaVersion checks that v is empty or belongs to major
+// version 1 (for example "1" or "1.0").
+func ValidateSchemaVersion(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "1" || strings.HasPrefix(v, "1.") {
+		return nil
+	}
+	return fmt.Errorf("unsupported schema_version %q (supported major version: 1)", v)
+}
+
 // RecordType names a record's kind.
 //
 // The three kinds share one stream: a client reads them all and tells
@@ -45,6 +60,9 @@ const (
 // command's arguments are fields on one type rather than a nested
 // object — the same shape pi's protocol uses.
 type Command struct {
+	// SchemaVersion identifies the client's protocol revision (optional;
+	// omitted defaults to "1.0").
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// ID correlates a response with its command. It is optional: a
 	// client that sends one command at a time does not need it.
 	ID string `json:"id,omitempty"`
@@ -63,6 +81,8 @@ type Command struct {
 // which command failed even when the failure happened before the
 // command was understood.
 type Response struct {
+	// SchemaVersion identifies the wire protocol revision.
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// ID repeats the command's ID.
 	ID string `json:"id,omitempty"`
 	// Type is always "response".
@@ -83,6 +103,8 @@ type Response struct {
 // reuse its names where the concepts match, so a client that knows the
 // REPL's events knows the RPC ones.
 type Event struct {
+	// SchemaVersion identifies the wire protocol revision.
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// Type names the event.
 	Type string `json:"type"`
 	// Data carries the event's payload.
@@ -131,22 +153,24 @@ const (
 // produces a response with no "data" field rather than a null one.
 func Success(id, command string, data any) *Response {
 	return &Response{
-		ID:      id,
-		Type:    string(RecordResponse),
-		Command: command,
-		Success: true,
-		Data:    data,
+		SchemaVersion: SchemaVersion,
+		ID:            id,
+		Type:          string(RecordResponse),
+		Command:       command,
+		Success:       true,
+		Data:          data,
 	}
 }
 
 // Failure builds a failed response.
 func Failure(id, command, message string) *Response {
 	return &Response{
-		ID:      id,
-		Type:    string(RecordResponse),
-		Command: command,
-		Success: false,
-		Error:   message,
+		SchemaVersion: SchemaVersion,
+		ID:            id,
+		Type:          string(RecordResponse),
+		Command:       command,
+		Success:       false,
+		Error:         message,
 	}
 }
 

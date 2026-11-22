@@ -167,6 +167,8 @@ type AgentPayload struct {
 
 // The state the get_state command reports.
 type State struct {
+	// SchemaVersion identifies the wire protocol revision.
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// Model is the model in use.
 	Model string `json:"model"`
 	// Provider is the provider serving the model.

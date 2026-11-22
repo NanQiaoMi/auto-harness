@@ -974,3 +974,42 @@ func TestPromptCommandWithImages(t *testing.T) {
 		t.Errorf("req[1] missing image: %+v", last)
 	}
 }
+
+func TestSchemaVersionEmissionAndValidation(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Message{{Content: "ok"}}}
+	server, _, _ := newTestServer(t, provider)
+	c := newClient(t, server)
+	defer c.close()
+
+	// 1. Omitted schema_version is accepted (backward-compatible v1) and response emits "1.0".
+	c.send(map[string]any{"id": "v1-omit", "type": CmdGetState})
+	resp := c.response(CmdGetState)
+	if resp["success"] != true {
+		t.Fatalf("get_state failed: %v", resp)
+	}
+	if resp["schema_version"] != SchemaVersion {
+		t.Errorf("response schema_version = %v, want %q", resp["schema_version"], SchemaVersion)
+	}
+	data, _ := resp["data"].(map[string]any)
+	if data["schema_version"] != SchemaVersion {
+		t.Errorf("state schema_version = %v, want %q", data["schema_version"], SchemaVersion)
+	}
+
+	// 2. Explicit "1.0" works and emits schema_version on events too.
+	c.send(map[string]any{"id": "v1-exp", "schema_version": "1.0", "type": CmdPrompt, "message": "hi"})
+	pResp := c.response(CmdPrompt)
+	if pResp["success"] != true {
+		t.Fatalf("prompt failed: %v", pResp)
+	}
+	settled := c.settled()
+	if settled["schema_version"] != SchemaVersion {
+		t.Errorf("event schema_version = %v, want %q", settled["schema_version"], SchemaVersion)
+	}
+
+	// 3. Unsupported major version ("2.0") is rejected cleanly without killing stream.
+	c.send(map[string]any{"id": "v2-bad", "schema_version": "2.0", "type": CmdGetState})
+	badResp := c.response("parse")
+	if badResp["success"] != false || !strings.Contains(badResp["error"].(string), "schema_version") {
+		t.Fatalf("expected schema_version error, got %v", badResp)
+	}
+}

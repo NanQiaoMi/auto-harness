@@ -20,12 +20,39 @@ type chatRequest struct {
 	Model    string `json:"model"`
 	Messages []struct {
 		Role       string `json:"role"`
-		Content    string `json:"content"`
+		Content    any    `json:"content"`
 		ToolCallID string `json:"tool_call_id"`
 	} `json:"messages"`
 	Tools []struct {
 		Function map[string]any `json:"function"`
 	} `json:"tools"`
+}
+
+func extractTextAndImages(content any) (string, int) {
+	switch v := content.(type) {
+	case string:
+		return v, 0
+	case []any:
+		var parts []string
+		images := 0
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch m["type"] {
+			case "text":
+				if txt, _ := m["text"].(string); txt != "" {
+					parts = append(parts, txt)
+				}
+			case "image_url":
+				images++
+			}
+		}
+		return strings.Join(parts, "\n"), images
+	default:
+		return "", 0
+	}
 }
 
 func main() {
@@ -57,14 +84,17 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	lastUser := ""
 	toolOutput := ""
 	userCount := 0
+	totalImages := 0
 	for _, m := range req.Messages {
+		text, imgs := extractTextAndImages(m.Content)
 		if m.Role == "tool" {
 			hasToolResult = true
-			toolOutput = m.Content
+			toolOutput = text
 		}
 		if m.Role == "user" {
-			lastUser = m.Content
+			lastUser = text
 			userCount++
+			totalImages += imgs
 		}
 	}
 	hasBash := false
@@ -136,6 +166,10 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		send(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_danger","function":{"name":"bash","arguments":""}}]}}]}`)
 		send(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"rm -rf /tmp/should-not-happen\"}"}}]}}]}`)
 		send(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
+	case totalImages > 0:
+		text := fmt.Sprintf("mockllm saw %d image(s): %s", totalImages, lastUser)
+		send(fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, text))
+		send(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
 	case hasBash:
 		send(`{"choices":[{"delta":{"content":"running tool"}}]}`)
 		send(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_mock","function":{"name":"bash","arguments":""}}]}}]}`)

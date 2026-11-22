@@ -186,6 +186,10 @@ func (e *ProcessExtension) startProcess(api *API) (*processRun, Manifest, error)
 		terminateRun(run)
 		return nil, Manifest{}, fmt.Errorf("ext: %s: manifest: %w", e.Command, err)
 	}
+	if err := ValidateSchemaVersion(manifest.SchemaVersion); err != nil {
+		terminateRun(run)
+		return nil, Manifest{}, fmt.Errorf("ext: %s: manifest: %w", e.Command, err)
+	}
 	if manifest.Name == "" {
 		manifest.Name = e.Command
 	}

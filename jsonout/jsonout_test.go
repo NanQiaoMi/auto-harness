@@ -98,7 +98,7 @@ func TestWriteIsOneLine(t *testing.T) {
 	if err := writer.Write(Record{Type: "message_update", Text: "hello"}); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if out.String() != "{\"type\":\"message_update\",\"text\":\"hello\"}\n" {
+	if out.String() != "{\"schema_version\":\"1.0\",\"type\":\"message_update\",\"text\":\"hello\"}\n" {
 		t.Errorf("the output is %q", out.String())
 	}
 }
@@ -495,5 +495,30 @@ func TestSettleBoundaryEventsReachTheStream(t *testing.T) {
 	}
 	if parsed[0]["type"] != EventAgentBeforeSettle || parsed[1]["type"] != EventAgentSettled {
 		t.Errorf("the records are %v", parsed)
+	}
+}
+
+func TestRecordsCarrySchemaVersion(t *testing.T) {
+	bus := ext.NewBus()
+	var out bytes.Buffer
+	writer := NewWriter(&out)
+	writer.Install(bus)
+
+	if err := writer.Write(Record{Type: EventAgentStart}); err != nil {
+		t.Fatal(err)
+	}
+	mustEmit(t, bus, &ext.Event{Type: ext.EventTurnStart})
+	if err := writer.WriteSettled(false); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed := records(t, &out)
+	if len(parsed) != 3 {
+		t.Fatalf("records = %d, want 3", len(parsed))
+	}
+	for i, r := range parsed {
+		if r["schema_version"] != SchemaVersion {
+			t.Errorf("record[%d] schema_version = %v, want %q", i, r["schema_version"], SchemaVersion)
+		}
 	}
 }
