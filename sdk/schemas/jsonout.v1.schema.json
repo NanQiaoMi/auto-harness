@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-harness.local/schemas/jsonout.v1.schema.json",
+  "title": "auto-harness JSON Output Stream v1.0",
+  "type": "object",
+  "x-schema-version": "1.0",
+  "oneOf": [
+    { "$ref": "#/$defs/Header" },
+    { "$ref": "#/$defs/Record" }
+  ],
+  "$defs": {
+    "SchemaVersion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "Header": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "type": { "const": "session" },
+        "version": { "type": "integer" },
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "cwd": { "type": "string" },
+        "parentSession": { "type": "string" }
+      }
+    },
+    "Record": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "type": {
+          "type": "string",
+          "enum": [
+            "agent_start",
+            "agent_end",
+            "agent_before_settle",
+            "agent_settled",
+            "retry",
+            "turn_start",
+            "turn_end",
+            "request_start",
+            "message_start",
+            "message_update",
+            "message_end",
+            "tool_execution_start",
+            "tool_execution_end",
+            "session_before_compact",
+            "session_compact"
+          ]
+        },
+        "text": { "type": "string" },
+        "thinking": { "type": "boolean" },
+        "aborted": { "type": "boolean" },
+        "willRetry": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "attempt": { "type": "integer" },
+        "maxAttempts": { "type": "integer" },
+        "tool": { "type": "string" },
+        "delayMs": { "type": "integer" },
+        "message": { "type": "object" },
+        "usage": { "type": "object" },
+        "request": { "type": "object" },
+        "toolCall": { "type": "object" },
+        "result": { "type": "object" }
+      }
+    }
+  }
+}
