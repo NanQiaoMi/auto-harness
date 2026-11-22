@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -418,7 +419,11 @@ func (s *Server) prompt(ctx context.Context, command *Command) *Response {
 	if err := decodeArgs(command.raw, &args); err != nil {
 		return Failure(command.ID, CmdPrompt, err.Error())
 	}
-	if strings.TrimSpace(args.Message) == "" {
+	images, err := decodePromptImages(args.Images)
+	if err != nil {
+		return Failure(command.ID, CmdPrompt, err.Error())
+	}
+	if strings.TrimSpace(args.Message) == "" && len(images) == 0 {
 		return Failure(command.ID, CmdPrompt, "the prompt has no message")
 	}
 
@@ -431,7 +436,7 @@ func (s *Server) prompt(ctx context.Context, command *Command) *Response {
 	running := s.streaming
 	s.mu.Unlock()
 	if running {
-		if err := s.Agent.Enqueue(args.Message); err != nil {
+		if err := s.Agent.EnqueueWithImages(args.Message, images); err != nil {
 			return Failure(command.ID, CmdPrompt, err.Error())
 		}
 		return Success(command.ID, CmdPrompt, map[string]any{"disposition": "queued"})
@@ -458,7 +463,7 @@ func (s *Server) prompt(ctx context.Context, command *Command) *Response {
 			s.mu.Unlock()
 		}
 		defer finish()
-		_, err := s.Agent.Run(runCtx, args.Message)
+		_, err := s.Agent.RunWithImages(runCtx, args.Message, images)
 		if err != nil {
 			s.emit(map[string]any{"type": "error", "message": err.Error()})
 		}
@@ -474,6 +479,44 @@ func (s *Server) prompt(ctx context.Context, command *Command) *Response {
 	}()
 
 	return nil
+}
+
+func decodePromptImages(inputs []ImageInput) ([]llm.Image, error) {
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	images := make([]llm.Image, 0, len(inputs))
+	for i, in := range inputs {
+		switch {
+		case in.Path != "" && in.Data != "":
+			return nil, fmt.Errorf("images[%d]: specify either path or data, not both", i)
+		case in.Path != "":
+			img, err := llm.LoadImageFile(in.Path)
+			if err != nil {
+				return nil, fmt.Errorf("images[%d]: %w", i, err)
+			}
+			if in.MediaType != "" && !strings.EqualFold(in.MediaType, img.MediaType) && !(strings.EqualFold(in.MediaType, "image/jpg") && img.MediaType == "image/jpeg") {
+				return nil, fmt.Errorf("images[%d]: content is %s, declared %s", i, img.MediaType, in.MediaType)
+			}
+			if in.Label != "" {
+				img.Label = in.Label
+			}
+			images = append(images, img)
+		case in.Data != "":
+			raw, err := base64.StdEncoding.DecodeString(in.Data)
+			if err != nil {
+				return nil, fmt.Errorf("images[%d]: invalid base64: %w", i, err)
+			}
+			img, err := llm.ImageFromBytes(raw, in.MediaType, in.Label)
+			if err != nil {
+				return nil, fmt.Errorf("images[%d]: %w", i, err)
+			}
+			images = append(images, img)
+		default:
+			return nil, fmt.Errorf("images[%d]: path or data is required", i)
+		}
+	}
+	return images, nil
 }
 
 // abort stops the current run.

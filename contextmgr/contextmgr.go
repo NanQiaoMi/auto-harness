@@ -379,6 +379,9 @@ func (m *Manager) summarizeUnits(ctx context.Context, units []unit, budget int, 
 func (m *Manager) prepareForSummary(ctx context.Context, messages []llm.Message, chunkTokens int, res *Result) []llm.Message {
 	out := cloneMessages(messages)
 	for i := range out {
+		if len(out[i].Images) > 0 {
+			out[i] = degradeMessageImages(out[i])
+		}
 		if m.estimator.EstimateMessage(out[i]) <= chunkTokens {
 			continue
 		}
@@ -545,6 +548,19 @@ func (m *Manager) truncateToFit(messages []llm.Message, budget int) []llm.Messag
 			}
 		}
 		if idx < 0 {
+			// If text is already small but images remain, degrade oldest
+			// non-summary images into compact text placeholders.
+			degraded := false
+			for i := 0; i < len(messages); i++ {
+				if !isSummaryMessage(messages[i]) && len(messages[i].Images) > 0 {
+					messages[i] = degradeMessageImages(messages[i])
+					degraded = true
+					break
+				}
+			}
+			if degraded {
+				continue
+			}
 			break
 		}
 		oldLen := len(messages[idx].Content)
@@ -662,11 +678,30 @@ func cloneMessages(messages []llm.Message) []llm.Message {
 	out := make([]llm.Message, len(messages))
 	for i, m := range messages {
 		out[i] = m
+		if m.Images != nil {
+			out[i].Images = append([]llm.Image(nil), m.Images...)
+		}
 		if m.ToolCalls != nil {
 			out[i].ToolCalls = append([]llm.ToolCall(nil), m.ToolCalls...)
 		}
 	}
 	return out
+}
+
+func degradeMessageImages(m llm.Message) llm.Message {
+	if len(m.Images) == 0 {
+		return m
+	}
+	var lines []string
+	if m.Content != "" {
+		lines = append(lines, m.Content)
+	}
+	for _, img := range m.Images {
+		lines = append(lines, img.Placeholder())
+	}
+	m.Content = strings.Join(lines, "\n")
+	m.Images = nil
+	return m
 }
 
 func truncateUTF8(s string, maxBytes int) string {

@@ -7,9 +7,12 @@
 package mcp
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/NanQiaoMi/auto-harness/llm"
 )
 
 // ProtocolVersion is the MCP revision this client speaks. Servers
@@ -174,6 +177,35 @@ func (r *CallToolResult) TextResult() string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// ExtractImages decodes supported image blocks (PNG, JPEG, WebP, GIF)
+// from a tool call result, returning valid llm.Image values alongside any
+// per-block decode warnings.
+func (r *CallToolResult) ExtractImages() ([]llm.Image, []string) {
+	var images []llm.Image
+	var warnings []string
+	for i, c := range r.Content {
+		if c.Type != "image" {
+			continue
+		}
+		if c.Data == "" {
+			warnings = append(warnings, fmt.Sprintf("[image block %d: empty data]", i))
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(c.Data)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("[image block %d: invalid base64: %v]", i, err))
+			continue
+		}
+		img, err := llm.ImageFromBytes(raw, c.MimeType, fmt.Sprintf("mcp-image-%d", i))
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("[image block %d: %v]", i, err))
+			continue
+		}
+		images = append(images, img)
+	}
+	return images, warnings
 }
 
 // ToolName returns the harness-facing name of a server tool.

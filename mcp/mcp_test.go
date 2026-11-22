@@ -413,3 +413,25 @@ func TestTimeoutIsBounded(t *testing.T) {
 		t.Errorf("the timeout took %s", elapsed)
 	}
 }
+
+func TestCallToolResultExtractImages(t *testing.T) {
+	// 1x1 PNG
+	b64PNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	res := CallToolResult{
+		Content: []Content{
+			{Type: "text", Text: "screenshot:"},
+			{Type: "image", Data: b64PNG, MimeType: "image/png"},
+			{Type: "image", Data: "not-valid-base64!!!", MimeType: "image/png"},
+		},
+	}
+	imgs, warnings := res.ExtractImages()
+	if len(imgs) != 1 {
+		t.Fatalf("imgs = %d, want 1 (warnings=%v)", len(imgs), warnings)
+	}
+	if imgs[0].MediaType != "image/png" || imgs[0].Width != 1 || imgs[0].Height != 1 {
+		t.Errorf("img = %+v", imgs[0])
+	}
+	if len(warnings) != 1 {
+		t.Errorf("warnings = %v, want 1", warnings)
+	}
+}

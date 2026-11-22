@@ -112,3 +112,56 @@ func TestGuessProvider(t *testing.T) {
 		t.Errorf("gpt -> %q", got)
 	}
 }
+
+func TestAnthropicMultimodalWirePayload(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	img, err := ImageFromBytes(makePNG(t, 4, 4), "image/png", "shot.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewAnthropicProvider("k", srv.URL)
+	stream, err := p.Chat(context.Background(), ChatRequest{
+		Model: "claude-sonnet-5-5",
+		Messages: []Message{
+			{Role: RoleUser, Content: "inspect", Images: []Image{img}},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1", Name: "read", Arguments: json.RawMessage(`{}`)}}},
+			{Role: RoleTool, ToolCallID: "t1", Content: "ok", Images: []Image{img}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.Close()
+
+	msgs := got["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %d, want 3", len(msgs))
+	}
+	userBlocks := msgs[0].(map[string]any)["content"].([]any)
+	if len(userBlocks) != 2 {
+		t.Fatalf("user blocks = %d, want 2", len(userBlocks))
+	}
+	imgBlock := userBlocks[1].(map[string]any)
+	if imgBlock["type"] != "image" {
+		t.Errorf("imgBlock type = %v", imgBlock["type"])
+	}
+	src := imgBlock["source"].(map[string]any)
+	if src["type"] != "base64" || src["media_type"] != "image/png" || src["data"] == "" {
+		t.Errorf("source = %#v", src)
+	}
+	toolBlocks := msgs[2].(map[string]any)["content"].([]any)
+	toolRes := toolBlocks[0].(map[string]any)
+	toolResContent := toolRes["content"].([]any)
+	if len(toolResContent) != 2 || toolResContent[1].(map[string]any)["type"] != "image" {
+		t.Errorf("tool_result content = %#v", toolResContent)
+	}
+}

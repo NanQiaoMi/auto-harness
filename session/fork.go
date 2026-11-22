@@ -103,6 +103,15 @@ func Fork(src *Session, opts ForkOptions) (*Session, error) {
 		Path: path,
 		tree: newTree,
 	}
+	for _, e := range newTree.Entries() {
+		if e.Type == EntryMessage && e.Message != nil && len(e.Message.Images) > 0 {
+			persisted, err := dst.persistImages(*e.Message)
+			if err != nil {
+				return nil, err
+			}
+			e.Message = &persisted
+		}
+	}
 	if err := dst.open(true); err != nil {
 		return nil, err
 	}

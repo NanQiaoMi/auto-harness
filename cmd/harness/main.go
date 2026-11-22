@@ -69,7 +69,17 @@ func main() {
 		noSubagents      = flag.Bool("no-subagents", false, "disable delegated background agents")
 		sandboxPlugins   = flag.Bool("sandbox-plugins", false, "confine plugin child processes with the OS sandbox")
 	)
+	var imageFlags stringSliceFlag
+	flag.Var(&imageFlags, "image", "attach an image file (repeatable; PNG, JPEG, WebP, GIF)")
 	flag.Parse()
+
+	if *rpcMode && len(imageFlags) > 0 {
+		fatal(fmt.Errorf("-image cannot be combined with -rpc (pass images per prompt command)"))
+	}
+	cliImages, err := loadCLIImages(imageFlags)
+	if err != nil {
+		fatal(err)
+	}
 
 	if *checkpointLimit < 1 {
 		fatal(fmt.Errorf("-checkpoint-limit must be at least 1"))
@@ -486,6 +496,7 @@ func main() {
 		Resolver: func(modelID string) (llm.Provider, error) {
 			return llmReg.ProviderFor(modelID, "")
 		},
+		ModelLookup: llmReg.Model,
 	}, bus, registry)
 	ag.Session = sess
 	// Extension-registered context policies wrap the kernel's builder.
@@ -662,15 +673,15 @@ func main() {
 	// the record that says the run is over.
 	if jsonOutput {
 		prompt := strings.Join(flag.Args(), " ")
-		if strings.TrimSpace(prompt) == "" {
-			failStartup(fmt.Errorf("--mode json requires a prompt argument"), shutdownRuntime)
+		if strings.TrimSpace(prompt) == "" && len(cliImages) == 0 {
+			failStartup(fmt.Errorf("--mode json requires a prompt argument or -image"), shutdownRuntime)
 		}
 		// A skill command is expanded here, the way the print mode
 		// does it: the REPL dispatches it through the registry.
 		if expanded, ok := skillSetup.expand(prompt); ok {
 			prompt = expanded
 		}
-		if code := runJSONMode(ctx, ag, sess, bus, prompt, workdir()); code != 0 {
+		if code := runJSONMode(ctx, ag, sess, bus, prompt, cliImages, workdir()); code != 0 {
 			exitStatus(code, shutdownRuntime)
 		}
 		return
@@ -678,15 +689,15 @@ func main() {
 
 	if *printMode {
 		prompt := strings.Join(flag.Args(), " ")
-		if strings.TrimSpace(prompt) == "" {
-			failStartup(fmt.Errorf("-print requires a prompt argument"), shutdownRuntime)
+		if strings.TrimSpace(prompt) == "" && len(cliImages) == 0 {
+			failStartup(fmt.Errorf("-print requires a prompt argument or -image"), shutdownRuntime)
 		}
 		// A skill command in one-shot mode is expanded here: the REPL
 		// dispatches it through the command registry instead.
 		if expanded, ok := skillSetup.expand(prompt); ok {
 			prompt = expanded
 		}
-		res, err := ag.Run(ctx, prompt)
+		res, err := ag.RunWithImages(ctx, prompt, cliImages)
 		if err != nil {
 			failStartup(err, shutdownRuntime)
 		}
@@ -711,7 +722,7 @@ func main() {
 
 	runREPL(ctx, ag, sess, bus, commands, cfg, llmReg, extMgr, loader, mcpSetup, permSetup,
 		telemetrySetup, shellShortcut, promptSetup, skillSetup, trustSetup, profileSetup,
-		checkpointMgr, subagents, lines, *quiet, *tuiMode)
+		checkpointMgr, subagents, lines, *quiet, *tuiMode, cliImages)
 }
 
 // workdir returns the current working directory, used to locate the
@@ -732,7 +743,7 @@ func sessionReason(resumed string) string {
 }
 
 // runREPL is the interactive loop.
-func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, subagents *orchestrator.Manager, lines perm.LineReader, quiet bool, tuiMode bool) {
+func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, llmReg *llm.Registry, extMgr *ext.Manager, loader *extensionLoader, mcpSetup *mcpSetup, permSetup *permSetup, telemetrySetup *telemetrySetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, trustSetup *trustSetup, profileSetup *profileSetup, checkpointMgr *gitkit.Manager, subagents *orchestrator.Manager, lines perm.LineReader, quiet bool, tuiMode bool, initialImages []llm.Image) {
 	gitOut := newCommandOutput(os.Stdout)
 	registerBuiltinCommands(commands, ag, sess, bus, cfg, llmReg, extMgr, loader, mcpSetup, permSetup, telemetrySetup, trustSetup, profileSetup, skillSetup, promptSetup, checkpointMgr, subagents, gitOut, &quiet)
 
@@ -764,7 +775,7 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 	}
 
 	if tuiMode {
-		runTUIREPL(ctx, ag, bus, commands, cfg, permSetup, shellShortcut, promptSetup, skillSetup, gitOut, quiet)
+		runTUIREPL(ctx, ag, bus, commands, cfg, permSetup, shellShortcut, promptSetup, skillSetup, gitOut, quiet, initialImages)
 		return
 	}
 
@@ -787,12 +798,12 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 	// only the REPL goroutine assigns it, so nothing here needs a lock.
 	var runDone chan struct{}
 
-	startRun := func(prompt string) {
+	startRun := func(prompt string, images []llm.Image) {
 		ch := make(chan struct{})
 		runDone = ch
 		go func() {
 			defer close(ch)
-			res, err := ag.Run(ctx, prompt)
+			res, err := ag.RunWithImages(ctx, prompt, images)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return
@@ -836,7 +847,12 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 		// and the "!" shortcut still work, because they never touch the
 		// model.
 		if runDone != nil && !strings.HasPrefix(line, "/") && !strings.HasPrefix(line, "!") {
-			if err := ag.Enqueue(line); err != nil {
+			clean, imgs, err := extractPromptImages(line, workdir())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				continue
+			}
+			if err := ag.EnqueueWithImages(clean, imgs); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			} else {
 				fmt.Printf("[queued: %s]\n", line)
@@ -862,10 +878,20 @@ func runREPL(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *e
 			continue
 		}
 
+		clean, imgs, err := extractPromptImages(line, workdir())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			continue
+		}
+		if len(initialImages) > 0 {
+			imgs = append(initialImages, imgs...)
+			initialImages = nil
+		}
+
 		// A previous run may still be going; wait for it before starting
 		// another, so two runs never interleave on one history.
 		wait()
-		startRun(line)
+		startRun(clean, imgs)
 	}
 }
 

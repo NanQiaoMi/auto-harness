@@ -92,6 +92,10 @@ func renderTranscript(messages []llm.Message) string {
 			b.WriteString(clipRunes(m.Content, 32000))
 			b.WriteByte('\n')
 		}
+		for _, img := range m.Images {
+			b.WriteString(img.Placeholder())
+			b.WriteByte('\n')
+		}
 		for _, call := range m.ToolCalls {
 			fmt.Fprintf(&b, "tool_call id=%s name=%s arguments=%s\n",
 				call.ID, call.Name, clipRunes(string(call.Arguments), 8000))

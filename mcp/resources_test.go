@@ -317,3 +317,23 @@ func TestReadResourceToolNeedsItsArguments(t *testing.T) {
 		t.Error("a missing server should be an error")
 	}
 }
+
+func TestReadResourceResultExtractImages(t *testing.T) {
+	b64PNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	res := ReadResourceResult{
+		Contents: []ResourceContents{
+			{URI: "file:///shot.png", MimeType: "image/png", Blob: b64PNG},
+			{URI: "file:///raw.bin", MimeType: "application/octet-stream", Blob: "AAEC"},
+		},
+	}
+	text, imgs := res.ExtractImages()
+	if len(imgs) != 1 {
+		t.Fatalf("imgs = %d, want 1", len(imgs))
+	}
+	if !strings.Contains(text, "image resource file:///shot.png") {
+		t.Errorf("text = %q", text)
+	}
+	if !strings.Contains(text, "binary resource file:///raw.bin omitted") {
+		t.Errorf("text = %q", text)
+	}
+}

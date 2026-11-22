@@ -290,7 +290,11 @@ func (s *Session) Append(msgs ...llm.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, m := range msgs {
-		m := m
+		var err error
+		m, err = s.persistImages(m)
+		if err != nil {
+			return err
+		}
 		e := &Entry{Type: EntryMessage, Message: &m}
 		s.tree.Append(e)
 		if err := s.writeRecord(e); err != nil {

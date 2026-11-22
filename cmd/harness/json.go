@@ -8,6 +8,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/agent"
 	"github.com/NanQiaoMi/auto-harness/ext"
 	"github.com/NanQiaoMi/auto-harness/jsonout"
+	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/session"
 )
 
@@ -22,7 +23,7 @@ import (
 //
 // The exit code reports whether the run succeeded, so a script can
 // check it without parsing the stream.
-func runJSONMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, prompt, cwd string) int {
+func runJSONMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bus *ext.Bus, prompt string, images []llm.Image, cwd string) int {
 	writer := jsonout.NewWriter(os.Stdout)
 
 	// The header goes first, before the run starts: a consumer that
@@ -35,7 +36,7 @@ func runJSONMode(ctx context.Context, ag *agent.Agent, sess *session.Session, bu
 	unsubscribe := writer.Install(bus)
 	defer unsubscribe()
 
-	res, err := ag.Run(ctx, prompt)
+	res, err := ag.RunWithImages(ctx, prompt, images)
 	if err != nil {
 		// The failure is reported on stderr: the stream is for the
 		// run, and a run that died is not a run that settled.

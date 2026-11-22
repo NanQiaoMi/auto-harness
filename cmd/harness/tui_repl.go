@@ -12,6 +12,7 @@ import (
 	"github.com/NanQiaoMi/auto-harness/agent"
 	"github.com/NanQiaoMi/auto-harness/config"
 	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/llm"
 	"github.com/NanQiaoMi/auto-harness/perm"
 	"github.com/NanQiaoMi/auto-harness/shellext"
 	"github.com/NanQiaoMi/auto-harness/tui"
@@ -20,7 +21,7 @@ import (
 // runTUIREPL runs the interactive loop on the differential-rendering
 // screen: model output updates a single pending line, so only the changed
 // row is rewritten instead of scrolling the whole screen.
-func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, permSetup *permSetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, gitOut *commandOutput, quiet bool) {
+func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ext.CommandRegistry, cfg *config.Config, permSetup *permSetup, shellShortcut *shellext.Shortcut, promptSetup *promptSetup, skillSetup *skillSetup, gitOut *commandOutput, quiet bool, initialImages []llm.Image) {
 	theme := tui.DefaultTheme()
 
 	term := tui.NewProcessTerminal()
@@ -153,12 +154,12 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 	// the REPL goroutine assigns it.
 	var runDone chan struct{}
 
-	startRun := func(prompt string) {
+	startRun := func(prompt string, images []llm.Image) {
 		ch := make(chan struct{})
 		runDone = ch
 		go func() {
 			defer close(ch)
-			res, err := ag.Run(ctx, prompt)
+			res, err := ag.RunWithImages(ctx, prompt, images)
 			if err != nil {
 				transcript.Appendf("error: %v", err)
 				screen.RequestRender()
@@ -210,7 +211,13 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 		// joins the queue. Slash commands and "!" still work, because
 		// they never touch the model.
 		if runDone != nil && !strings.HasPrefix(line, "/") && !strings.HasPrefix(line, "!") {
-			if err := ag.Enqueue(line); err != nil {
+			clean, imgs, err := extractPromptImages(line, workdir())
+			if err != nil {
+				transcript.Appendf("error: %v", err)
+				screen.RequestRender()
+				continue
+			}
+			if err := ag.EnqueueWithImages(clean, imgs); err != nil {
 				transcript.Appendf("error: %v", err)
 			} else {
 				transcript.Appendf("> %s (queued)", line)
@@ -239,11 +246,21 @@ func runTUIREPL(ctx context.Context, ag *agent.Agent, bus *ext.Bus, commands *ex
 				continue
 			}
 		}
+		clean, imgs, err := extractPromptImages(line, workdir())
+		if err != nil {
+			transcript.Appendf("error: %v", err)
+			screen.RequestRender()
+			continue
+		}
+		if len(initialImages) > 0 {
+			imgs = append(initialImages, imgs...)
+			initialImages = nil
+		}
 		transcript.Appendf("> %s", line)
 		screen.RequestRender()
 
 		// Two runs must never interleave on one history.
 		wait()
-		startRun(line)
+		startRun(clean, imgs)
 	}
 }

@@ -70,11 +70,21 @@ const (
 	CmdCancelAgent = "cancel_agent"
 )
 
+// ImageInput attaches an image to a PromptCommand either by local file
+// path or as base64-encoded bytes.
+type ImageInput struct {
+	Path      string `json:"path,omitempty"`
+	Data      string `json:"data,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
+	Label     string `json:"label,omitempty"`
+}
+
 // PromptCommand sends a message to the agent.
 type PromptCommand struct {
-	ID      string `json:"id,omitempty"`
-	Type    string `json:"type"`
-	Message string `json:"message"`
+	ID      string       `json:"id,omitempty"`
+	Type    string       `json:"type"`
+	Message string       `json:"message"`
+	Images  []ImageInput `json:"images,omitempty"`
 }
 
 // SetModelCommand switches the model.

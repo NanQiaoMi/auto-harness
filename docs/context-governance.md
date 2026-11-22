@@ -23,7 +23,9 @@ template, skill) goes through the same `Builder`.
 - Summarizing an oversized system prompt or tool schema. Those are
   instructions and contracts, not transcript; the manager warns rather
   than silently rewriting them.
-- Multimodal token accounting. The current `llm.Message` is text-only.
+- Audio/video token accounting. Static images (`llm.Image`) are
+  estimated by pixel budget (256..2048 tokens) and degraded to compact
+  `[image: ...]` text placeholders when older turns are summarized.
 - Encrypting local session or artifact files.
 
 ## Interfaces
