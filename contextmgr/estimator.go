@@ -54,14 +54,32 @@ func (e HeuristicEstimator) EstimateText(s string) int {
 	return int(math.Ceil(units * e.safety()))
 }
 
-// EstimateMessage estimates one message, including its envelope and any
-// tool-call arguments.
+// EstimateMessage estimates one message, including its envelope,
+// image attachments and any tool-call arguments.
 func (e HeuristicEstimator) EstimateMessage(m llm.Message) int {
 	total := 6 + e.EstimateText(m.Content)
+	for _, img := range m.Images {
+		total += e.estimateImage(img)
+	}
 	for _, call := range m.ToolCalls {
 		total += 8 + e.EstimateText(call.Name) + e.EstimateText(string(call.Arguments))
 	}
 	return total
+}
+
+func (e HeuristicEstimator) estimateImage(img llm.Image) int {
+	base := 1024
+	if img.Width > 0 && img.Height > 0 {
+		pxTokens := int(math.Ceil(float64(img.Width*img.Height) / 750.0))
+		if pxTokens < 256 {
+			pxTokens = 256
+		}
+		if pxTokens > 2048 {
+			pxTokens = 2048
+		}
+		base = pxTokens
+	}
+	return int(math.Ceil(float64(base) * e.safety()))
 }
 
 // EstimateMessages estimates a message sequence.

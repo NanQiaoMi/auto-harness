@@ -50,3 +50,26 @@ func TestHeuristicEstimatorIncludesToolCallsAndSchemas(t *testing.T) {
 		t.Fatal("a tool schema must have a positive estimate")
 	}
 }
+
+func TestHeuristicEstimatorIncludesImages(t *testing.T) {
+	e := HeuristicEstimator{}
+	plain := llm.Message{Role: llm.RoleUser, Content: "see"}
+	smallImg := plain
+	smallImg.Images = []llm.Image{{MediaType: "image/png", Width: 100, Height: 100}}
+	bigImg := plain
+	bigImg.Images = []llm.Image{{MediaType: "image/png", Width: 3000, Height: 3000}}
+	noDims := plain
+	noDims.Images = []llm.Image{{MediaType: "image/png"}}
+
+	if got, base := e.EstimateMessage(smallImg), e.EstimateMessage(plain); got <= base {
+		t.Fatalf("small image estimate %d did not exceed plain %d", got, base)
+	}
+	if e.EstimateMessage(bigImg) <= e.EstimateMessage(smallImg) {
+		t.Fatalf("big image %d should cost more than small image %d",
+			e.EstimateMessage(bigImg), e.EstimateMessage(smallImg))
+	}
+	if e.EstimateMessage(noDims) <= e.EstimateMessage(plain) {
+		t.Fatalf("dimensionless image %d should add fallback tokens over %d",
+			e.EstimateMessage(noDims), e.EstimateMessage(plain))
+	}
+}

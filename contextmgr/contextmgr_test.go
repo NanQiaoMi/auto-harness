@@ -390,3 +390,60 @@ func assertNoOrphanToolResult(t *testing.T, messages []llm.Message) {
 		}
 	}
 }
+
+func TestBuildDegradesOldImagesDuringCompactionAndKeepsRecentImages(t *testing.T) {
+	summarizer := &recordingSummarizer{}
+	opts := testOptions()
+	opts.ContextWindow = 4000
+	opts.MaxOutputTokens = 400
+	opts.CompactAt = 0.5
+	opts.KeepRecentMessages = 2
+	opts.KeepRecentTokens = 2500
+	m := NewManager(opts, nil, summarizer, nil)
+
+	oldImg := llm.Image{MediaType: "image/png", Width: 1200, Height: 900, SHA256: "abcdef0123456789"}
+	recentImg := llm.Image{MediaType: "image/jpeg", Width: 400, Height: 300, SHA256: "1122334455667788"}
+
+	msgs := []llm.Message{
+		{Role: llm.RoleUser, Content: "old screenshot " + largeText(1200), Images: []llm.Image{oldImg}},
+		{Role: llm.RoleAssistant, Content: "old reply " + largeText(1200)},
+		{Role: llm.RoleUser, Content: "mid " + largeText(1200)},
+		{Role: llm.RoleAssistant, Content: "mid reply " + largeText(1200)},
+		{Role: llm.RoleUser, Content: "recent screenshot", Images: []llm.Image{recentImg}},
+	}
+	got, err := m.Build(context.Background(), Input{
+		SystemPrompt:    "system",
+		Messages:        msgs,
+		ContextWindow:   opts.ContextWindow,
+		MaxOutputTokens: opts.MaxOutputTokens,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Compacted {
+		t.Fatal("expected compaction to trigger")
+	}
+	if len(summarizer.calls) == 0 {
+		t.Fatal("expected summarizer to be called")
+	}
+	// Summarizer must receive placeholders instead of raw images.
+	sawPlaceholder := false
+	for _, call := range summarizer.calls {
+		for _, msg := range call {
+			if len(msg.Images) > 0 {
+				t.Fatalf("summarizer received raw images: %+v", msg.Images)
+			}
+			if strings.Contains(msg.Content, "[image: image/png 1200x900 sha256:abcdef01]") {
+				sawPlaceholder = true
+			}
+		}
+	}
+	if !sawPlaceholder {
+		t.Fatal("summarizer did not receive degraded image placeholder")
+	}
+	// Recent retained user message still has its original image.
+	last := got.Messages[len(got.Messages)-1]
+	if len(last.Images) != 1 || last.Images[0].SHA256 != recentImg.SHA256 {
+		t.Fatalf("recent image lost during compaction: %+v", last)
+	}
+}
