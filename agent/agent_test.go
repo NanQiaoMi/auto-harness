@@ -821,3 +821,65 @@ func TestParallelCallsRespectTheCap(t *testing.T) {
 		t.Errorf("peak concurrency = %d, want at least 2", peak)
 	}
 }
+
+func TestRunWithImagesAndToolImagePropagation(t *testing.T) {
+	pngBytes := []byte{
+		0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+		0, 0, 0, 13, 'I', 'H', 'D', 'R',
+		0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
+		0x1f, 0x15, 0xc4, 0x89,
+		0, 0, 0, 10, 'I', 'D', 'A', 'T', 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1,
+		0x0d, 0x0a, 0x2d, 0xb4,
+		0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82,
+	}
+	img, err := llm.ImageFromBytes(pngBytes, "image/png", "ui.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &fakeProvider{responses: []llm.Message{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "snap", Arguments: json.RawMessage(`{}`)}}},
+		{Content: "saw both images"},
+	}}
+	ag, reg, _ := newTestAgent(t, provider)
+	_ = reg.Register(&tools.Tool{
+		Name: "snap", ReadOnly: true, Parameters: map[string]any{"type": "object"},
+		Execute: func(ctx context.Context, callID string, args json.RawMessage, onUpdate func(tools.Update)) (tools.Result, error) {
+			return tools.Result{Content: "captured", Images: []llm.Image{img}}, nil
+		},
+	})
+
+	res, err := ag.RunWithImages(context.Background(), "", []llm.Image{img})
+	if err != nil {
+		t.Fatalf("RunWithImages: %v", err)
+	}
+	if res.Final != "saw both images" {
+		t.Errorf("Final = %q", res.Final)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(provider.requests))
+	}
+	if len(provider.requests[0].Messages[0].Images) != 1 {
+		t.Errorf("user message missing image")
+	}
+	last := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if last.Role != llm.RoleTool || len(last.Images) != 1 {
+		t.Errorf("tool message missing image: %+v", last)
+	}
+}
+
+func TestRunRejectsImagesOnTextOnlyModel(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Message{{Content: "should not reach"}}}
+	bus := ext.NewBus()
+	reg := tools.NewRegistry()
+	ag := New(Config{Provider: provider, Model: "deepseek-chat", MaxTurns: 2}, bus, reg)
+
+	img := llm.Image{MediaType: "image/png", Width: 1, Height: 1, Data: []byte{1, 2, 3}}
+	_, err := ag.RunWithImages(context.Background(), "describe", []llm.Image{img})
+	if err == nil || !strings.Contains(err.Error(), "does not support image inputs") {
+		t.Fatalf("err = %v, want image unsupported error", err)
+	}
+	if len(provider.requests) != 0 {
+		t.Errorf("provider should not have been called for text-only model")
+	}
+}

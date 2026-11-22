@@ -1,8 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,5 +122,40 @@ func TestTruncate(t *testing.T) {
 	}
 	if !strings.Contains(out, "truncated") {
 		t.Error("missing truncation marker")
+	}
+}
+
+func TestReadToolDetectsAndReturnsImages(t *testing.T) {
+	dir := t.TempDir()
+	imgPath := filepath.Join(dir, "pic.png")
+	im := image.NewRGBA(image.Rect(0, 0, 10, 12))
+	im.Set(0, 0, color.RGBA{R: 200, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, im); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imgPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := execTool(t, NewReadToolAt(dir), `{"path":"pic.png"}`)
+	if res.IsError {
+		t.Fatalf("read image failed: %s", res.Content)
+	}
+	if len(res.Images) != 1 {
+		t.Fatalf("Images = %d, want 1", len(res.Images))
+	}
+	if res.Images[0].MediaType != "image/png" || res.Images[0].Width != 10 || res.Images[0].Height != 12 {
+		t.Errorf("image = %+v", res.Images[0])
+	}
+
+	// Corrupt image header should surface as tool error rather than binary garbage.
+	badPath := filepath.Join(dir, "bad.png")
+	if err := os.WriteFile(badPath, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 1, 2}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badRes := execTool(t, NewReadToolAt(dir), `{"path":"bad.png"}`)
+	if !badRes.IsError {
+		t.Errorf("expected IsError for corrupt PNG, got %+v", badRes)
 	}
 }

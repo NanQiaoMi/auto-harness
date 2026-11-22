@@ -2,10 +2,13 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/NanQiaoMi/auto-harness/llm"
 )
 
 // Protocol method names for the resource methods.
@@ -93,6 +96,41 @@ func (r *ReadResourceResult) TextResult() string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// ExtractImages decodes image blobs (PNG, JPEG, WebP, GIF) from the
+// resource result, returning both a model-friendly text summary and the
+// decoded llm.Image attachments. Non-image binary blobs remain omitted.
+func (r *ReadResourceResult) ExtractImages() (string, []llm.Image) {
+	var b strings.Builder
+	var images []llm.Image
+	for i, c := range r.Contents {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		switch {
+		case c.Text != "":
+			b.WriteString(c.Text)
+		case c.Blob != "" && llm.IsSupportedImageMIME(c.MimeType):
+			raw, err := base64.StdEncoding.DecodeString(c.Blob)
+			if err != nil {
+				b.WriteString(fmt.Sprintf("[image resource %s error: invalid base64: %v]", c.URI, err))
+				continue
+			}
+			img, err := llm.ImageFromBytes(raw, c.MimeType, c.URI)
+			if err != nil {
+				b.WriteString(fmt.Sprintf("[image resource %s error: %v]", c.URI, err))
+				continue
+			}
+			images = append(images, img)
+			b.WriteString(fmt.Sprintf("[image resource %s (%s, %dx%d)]", c.URI, img.MediaType, img.Width, img.Height))
+		case c.Blob != "":
+			b.WriteString(fmt.Sprintf("[binary resource %s omitted (%d bytes)]", c.URI, len(c.Blob)))
+		default:
+			b.WriteString(fmt.Sprintf("[empty resource %s]", c.URI))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n"), images
 }
 
 // ListResources lists the server's resources, following pagination.

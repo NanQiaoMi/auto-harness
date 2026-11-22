@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/NanQiaoMi/auto-harness/tools"
@@ -136,7 +137,14 @@ func (m *Manager) registerTool(server string, client *Client, t Tool) error {
 			if res.StructuredContent != nil && text == "" {
 				text = string(res.StructuredContent)
 			}
-			return tools.Result{Content: text, IsError: res.IsError}, nil
+			images, warnings := res.ExtractImages()
+			if len(warnings) > 0 {
+				if text != "" {
+					text += "\n"
+				}
+				text += strings.Join(warnings, "\n")
+			}
+			return tools.Result{Content: text, Images: images, IsError: res.IsError}, nil
 		},
 	}
 	return m.registry.Register(tool)
@@ -264,7 +272,8 @@ func (m *Manager) resourceTools() []*tools.Tool {
 				if err != nil {
 					return tools.Result{Content: err.Error(), IsError: true}, nil
 				}
-				return tools.Result{Content: result.TextResult()}, nil
+				text, images := result.ExtractImages()
+				return tools.Result{Content: text, Images: images}, nil
 			},
 		},
 	}

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/NanQiaoMi/auto-harness/llm"
 )
 
 // fileReadLimit caps Read output (lines).
@@ -50,11 +53,11 @@ func newReadTool(root string) *Tool {
 		Name:          "read",
 		Label:         "Read File",
 		ReadOnly:      true,
-		Description:   "Read a UTF-8 text file. Returns the content with line numbers. Reads up to 2000 lines by default.",
-		PromptSnippet: "read: read a text file (optional offset/limit for large files)",
+		Description:   "Read a UTF-8 text file or supported image (PNG, JPEG, WebP, GIF). Text files return line-numbered content (up to 2000 lines by default); image files are attached for visual inspection.",
+		PromptSnippet: "read: read a text file or image (optional offset/limit for text)",
 		PromptGuidelines: []string{
-			"Use read to inspect files before editing them.",
-			"For large files, read only the range you need with offset/limit.",
+			"Use read to inspect files (or images) before editing or referencing them.",
+			"For large text files, read only the range you need with offset/limit.",
 		},
 		Parameters: map[string]any{
 			"type": "object",
@@ -87,6 +90,9 @@ func newReadTool(root string) *Tool {
 			if err != nil {
 				return Result{Content: err.Error(), IsError: true}, nil
 			}
+			if imgRes, ok := readImageIfSupported(path); ok {
+				return imgRes, nil
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return Result{Content: fmt.Sprintf("read %s: %v", path, err), IsError: true}, nil
@@ -118,6 +124,44 @@ func newReadTool(root string) *Tool {
 			return Result{Content: truncate(b.String())}, nil
 		},
 	}
+}
+
+func readImageIfSupported(path string) (Result, bool) {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return Result{}, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Result{}, false
+	}
+	var header [16]byte
+	n, err := io.ReadFull(f, header[:])
+	_ = f.Close()
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return Result{}, false
+	}
+	mime := llm.DetectImageMIME(header[:n])
+	if mime == "" {
+		return Result{}, false
+	}
+	if info.Size() > llm.MaxImageBytes {
+		return Result{
+			Content: fmt.Sprintf("read %s: image exceeds %d bytes (%d bytes)", path, llm.MaxImageBytes, info.Size()),
+			IsError: true,
+		}, true
+	}
+	img, err := llm.LoadImageFile(path)
+	if err != nil {
+		return Result{
+			Content: fmt.Sprintf("read %s: %v", path, err),
+			IsError: true,
+		}, true
+	}
+	return Result{
+		Content: fmt.Sprintf("Read image %s (%s, %dx%d, %d bytes)", filepath.Base(path), img.MediaType, img.Width, img.Height, img.ByteSize),
+		Images:  []llm.Image{img},
+	}, true
 }
 
 // NewWriteTool returns the file-writing tool.

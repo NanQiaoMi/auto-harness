@@ -59,6 +59,9 @@ type Config struct {
 	// asks it for a provider on every turn, so switching models can
 	// switch providers too (see llm.Registry.ProviderFor).
 	Resolver func(modelID string) (llm.Provider, error)
+	// ModelLookup resolves model metadata (such as image input support).
+	// When nil, llm.Lookup is used.
+	ModelLookup func(modelID string) (llm.Model, bool)
 	// MaxRetries bounds how many times a failed model request is tried
 	// again. Zero means the default (3); a negative value disables
 	// retries.
@@ -114,6 +117,11 @@ type Result struct {
 	BudgetExceeded bool
 }
 
+type queuedInput struct {
+	text   string
+	images []llm.Image
+}
+
 // Agent runs the tool-calling loop over a conversation history,
 // optionally mirrored to a persistent Session.
 type Agent struct {
@@ -146,7 +154,7 @@ type Agent struct {
 	// progress. Run drains them between turns, so a follow-up typed
 	// mid-run becomes the next thing the model sees rather than an
 	// error or a lost line.
-	queued []string
+	queued []queuedInput
 	// running reports whether a Run is in progress.
 	running bool
 
@@ -293,19 +301,25 @@ func (a *Agent) providerFor() (llm.Provider, error) {
 // The bool result reports whether a run was already in progress, so a
 // caller can tell "queued" from "started".
 func (a *Agent) Submit(ctx context.Context, text string) (queued bool, err error) {
+	return a.SubmitWithImages(ctx, text, nil)
+}
+
+// SubmitWithImages sends a message with optional image attachments,
+// queuing it if a run is already active or starting a run otherwise.
+func (a *Agent) SubmitWithImages(ctx context.Context, text string, images []llm.Image) (queued bool, err error) {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && len(images) == 0 {
 		return false, fmt.Errorf("agent: an empty message cannot be submitted")
 	}
 	a.mu.Lock()
 	if a.running {
-		a.queued = append(a.queued, text)
+		a.queued = append(a.queued, queuedInput{text: text, images: cloneImages(images)})
 		a.mu.Unlock()
 		return true, nil
 	}
 	a.mu.Unlock()
 
-	_, err = a.Run(ctx, text)
+	_, err = a.RunWithImages(ctx, text, images)
 	return false, err
 }
 
@@ -318,13 +332,18 @@ func (a *Agent) Submit(ctx context.Context, text string) (queued bool, err error
 // a run starts is picked up by that run, so the small window between
 // "a run was accepted" and "the run began" does not lose input.
 func (a *Agent) Enqueue(text string) error {
+	return a.EnqueueWithImages(text, nil)
+}
+
+// EnqueueWithImages queues a message with optional image attachments.
+func (a *Agent) EnqueueWithImages(text string, images []llm.Image) error {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && len(images) == 0 {
 		return fmt.Errorf("agent: an empty message cannot be queued")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.queued = append(a.queued, text)
+	a.queued = append(a.queued, queuedInput{text: text, images: cloneImages(images)})
 	return nil
 }
 
@@ -332,7 +351,15 @@ func (a *Agent) Enqueue(text string) error {
 func (a *Agent) Queue() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]string(nil), a.queued...)
+	out := make([]string, len(a.queued))
+	for i, q := range a.queued {
+		if q.text != "" {
+			out[i] = q.text
+		} else if len(q.images) > 0 {
+			out[i] = q.images[0].Placeholder()
+		}
+	}
+	return out
 }
 
 // Running reports whether a run is in progress.
@@ -343,7 +370,7 @@ func (a *Agent) Running() bool {
 }
 
 // takeQueued removes and returns the queued messages.
-func (a *Agent) takeQueued() []string {
+func (a *Agent) takeQueued() []queuedInput {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := a.queued
@@ -392,10 +419,15 @@ const maxSettleRounds = 8
 // ask for one more run; agent_settled fires only when none of that is
 // left, so a consumer can treat it as "the agent is idle now".
 func (a *Agent) Run(ctx context.Context, input string) (*Result, error) {
+	return a.RunWithImages(ctx, input, nil)
+}
+
+// RunWithImages executes one user turn with optional image attachments.
+func (a *Agent) RunWithImages(ctx context.Context, input string, images []llm.Image) (*Result, error) {
 	a.mu.Lock()
 	a.running = true
 	a.mu.Unlock()
-	return a.run(ctx, input)
+	return a.run(ctx, input, images)
 }
 
 // run is the body of Run.
@@ -404,7 +436,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*Result, error) {
 // function knows when the queue is empty: the check and the clear happen
 // in one critical section, so a message queued concurrently is either
 // drained by this run or seen by a caller that then starts the next one.
-func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
+func (a *Agent) run(ctx context.Context, input string, images []llm.Image) (*Result, error) {
 	// cleared reports that the normal exit already lowered the flag. A
 	// run that started in the meantime must not have it lowered again.
 	cleared := false
@@ -438,7 +470,7 @@ func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
 	}
 	input = inputEv.Text
 
-	userMsg := llm.Message{Role: llm.RoleUser, Content: input}
+	userMsg := llm.Message{Role: llm.RoleUser, Content: input, Images: cloneImages(images)}
 
 	// before_agent_start: extensions may rewrite the message or the
 	// system prompt, or cancel the run entirely.
@@ -465,8 +497,8 @@ func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
 
 	// A message queued just before this run began belongs to it: the
 	// caller accepted it while a run was starting.
-	for _, text := range a.takeQueued() {
-		a.append(llm.Message{Role: llm.RoleUser, Content: text})
+	for _, q := range a.takeQueued() {
+		a.append(llm.Message{Role: llm.RoleUser, Content: q.text, Images: cloneImages(q.images)})
 		res.Queued++
 	}
 
@@ -518,8 +550,8 @@ func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
 				a.append(injected)
 			}
 			if queued := a.takeQueued(); len(queued) > 0 {
-				for _, text := range queued {
-					a.append(llm.Message{Role: llm.RoleUser, Content: text})
+				for _, q := range queued {
+					a.append(llm.Message{Role: llm.RoleUser, Content: q.text, Images: cloneImages(q.images)})
 					res.Queued++
 				}
 				continue
@@ -601,9 +633,9 @@ func (a *Agent) run(ctx context.Context, input string) (*Result, error) {
 }
 
 // appendQueued adds the queued messages to history as user messages.
-func appendQueued(a *Agent, res *Result, queued []string) {
-	for _, text := range queued {
-		a.append(llm.Message{Role: llm.RoleUser, Content: text})
+func appendQueued(a *Agent, res *Result, queued []queuedInput) {
+	for _, q := range queued {
+		a.append(llm.Message{Role: llm.RoleUser, Content: q.text, Images: cloneImages(q.images)})
 		res.Queued++
 	}
 }
@@ -626,7 +658,7 @@ func (a *Agent) Drain(ctx context.Context) error {
 		a.queued = a.queued[1:]
 		a.mu.Unlock()
 
-		if _, err := a.Run(ctx, first); err != nil {
+		if _, err := a.RunWithImages(ctx, first.text, first.images); err != nil {
 			return err
 		}
 	}
@@ -716,6 +748,10 @@ func (a *Agent) complete(ctx context.Context) (llm.Message, llm.Usage, ext.Reque
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
 		Thinking:    cfg.Thinking,
+	}
+	if hasMessageImages(req.Messages) && !modelSupportsImages(cfg) {
+		return llm.Message{}, llm.Usage{}, ext.Request{},
+			fmt.Errorf("agent: model %q does not support image inputs", cfg.Model)
 	}
 	provider, err := a.providerFor()
 	if err != nil {
@@ -995,9 +1031,46 @@ func (a *Agent) executeTool(ctx context.Context, call *llm.ToolCall) llm.Message
 	return llm.Message{
 		Role:       llm.RoleTool,
 		Content:    result.Content,
+		Images:     cloneImages(result.Images),
 		ToolCallID: call.ID,
 		IsError:    result.IsError,
 	}
+}
+
+func cloneImages(images []llm.Image) []llm.Image {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]llm.Image, len(images))
+	copy(out, images)
+	return out
+}
+
+func hasMessageImages(msgs []llm.Message) bool {
+	for _, m := range msgs {
+		if len(m.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func modelSupportsImages(cfg Config) bool {
+	if cfg.Model == "" {
+		return true
+	}
+	if cfg.ModelLookup != nil {
+		m, ok := cfg.ModelLookup(cfg.Model)
+		if !ok {
+			return true
+		}
+		return m.SupportsImage()
+	}
+	m, ok := llm.Lookup(cfg.Model)
+	if !ok || m == nil {
+		return true
+	}
+	return m.SupportsImage()
 }
 
 // Compact compresses the history (session_before_compact /

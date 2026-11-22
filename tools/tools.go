@@ -23,6 +23,7 @@ type Update struct {
 // model verbatim.
 type Result struct {
 	Content string
+	Images  []llm.Image
 	IsError bool
 	// ExitCode is the command's exit status, for the tools that run
 	// commands. It is zero for the tools that do not.
