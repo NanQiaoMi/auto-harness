@@ -324,6 +324,9 @@ export OPENAI_API_KEY=oc_sk-...
 ./bin/harness -profile ./examples/agent-profiles/coding.json
 ./bin/harness -list-profiles
 
+# 生成零依赖插件骨架（支持 python / go / typescript）
+./bin/harness -plugin-init my-tool -plugin-lang python -plugin-dir ./my-tool
+
 # 管理插件：签名 registry → 依赖解析 → SHA-256 校验 → 原子安装 → lockfile
 ./bin/harness -plugin-trust acme=./publisher.pub
 ./bin/harness -plugin-trust-list
@@ -1012,6 +1015,20 @@ lockfile schema 2 会保存安装时的 `publisher` / `signer_key_id`；旧 sche
 读取，并在下一次写入时升级。lockfile 本身没有签名，不是不可篡改的安装历史。Ed25519
 签名认证的是 registry 元数据和 artifact 摘要，不是运行时沙箱；密钥吊销、过期、
 anti-rollback/freshness、自动更新和回滚通道仍是后续工作。
+
+### 插件脚手架（`-plugin-init`）
+
+可通过 `-plugin-init <name>` 一键创建开箱即用、零外部依赖的插件目录骨架，配合
+`-plugin-lang`（`python` / `go` / `typescript`，默认 `python`）与 `-plugin-dir`（默认 `./<name>`）：
+
+```bash
+./bin/harness -plugin-init my-plugin -plugin-lang python
+./bin/harness -plugin-init my-plugin -plugin-lang go -plugin-dir ./plugins/my-plugin
+./bin/harness -plugin-init my-plugin -plugin-lang typescript -plugin-dir ./plugins/my-ts-plugin
+```
+
+生成的目录默认包含符合规范的 `plugin.json`（默认配置只读沙箱 `"write_paths": [], "allow_network": false`）、
+零依赖 stdio JSON-RPC `1.0` 示例工具（`<name>_echo`）与 `README.md`，拒绝覆盖非空目录。
 
 ### 热重载
 
