@@ -171,3 +171,31 @@ func TestPluginCommandRejectsUnsignedRemoteRegistry(t *testing.T) {
 		t.Fatalf("unsigned remote install = %v/%d/%v", handled, code, err)
 	}
 }
+
+func TestPluginCommandInit(t *testing.T) {
+	isolateHome(t)
+	outDir := filepath.Join(t.TempDir(), "hello-plugin")
+	handled, code, err := runPluginCommand(pluginCommandOptions{
+		Init: "hello-plugin",
+		Lang: "typescript",
+		Dir:  outDir,
+	})
+	if !handled || code != 0 || err != nil {
+		t.Fatalf("init handled/code/error = %v/%d/%v", handled, code, err)
+	}
+	cand, err := plugins.Load(outDir)
+	if err != nil {
+		t.Fatalf("plugins.Load(%s): %v", outDir, err)
+	}
+	if cand.Manifest.Name != "hello-plugin" {
+		t.Errorf("Name = %q, want hello-plugin", cand.Manifest.Name)
+	}
+
+	handled, code, err = runPluginCommand(pluginCommandOptions{
+		Init: "other",
+		List: true,
+	})
+	if !handled || code == 0 || err == nil {
+		t.Fatalf("init+list handled/code/error = %v/%d/%v", handled, code, err)
+	}
+}
