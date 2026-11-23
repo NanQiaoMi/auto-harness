@@ -83,7 +83,7 @@ perm/                权限层（内核无内置权限，作为扩展挂在 tool
   config.go            内置规则（deny 底线）、permissions.json 读取与合并
   guard.go             Guard：tool_call 钩子、审批器、统计
   input.go             共享输入流（REPL 与审批提示共用一个 reader）
-sandbox/             macOS Seatbelt 沙箱：写白名单 + 读黑名单 + 网络开关
+sandbox/             跨平台进程沙箱（可插拔 Backend：macOS Seatbelt + Linux Landlock/seccomp）
 telemetry/           厂商中立遥测契约（对齐 pi-telemetry）               ← pi-telemetry
   telemetry.go         Context/Span/Metrics/Propagation/Store 接口 + Noop 实现
   metrics.go           counter / upDownCounter / histogram + 类型化绑定
@@ -1556,10 +1556,7 @@ harness 沿用这个设计：权限守卫是一个扩展，挂在 `tool_call` �
 > /permissions allow ./build      # 把某个路径加入 allow 规则（写回用户级文件）
 ```
 
-**沙箱**（[sandbox/](sandbox/)）：macOS 上用 Seatbelt (`sandbox-exec`) 限制
-shell 命令。默认**写白名单**（工作目录）+ **读黑名单**（`~/.ssh`、`~/.aws`、
-`~/.gnupg`、`~/.config/gh`、`~/.kube`、`~/.docker`），网络默认关闭。
-规则顺序是「先 deny 后 allow」——Seatbelt 是最后匹配者胜出。
+**沙箱**（[sandbox/](sandbox/)）：通过可插拔 `sandbox.Backend` 接口支持多平台进程级隔离——macOS 上使用 Seatbelt (`sandbox-exec`)，Linux 上使用原生无特权 Landlock LSM（内核 >= 5.13）+ seccomp BPF 网络过滤。默认**写白名单**（工作目录）+ **读黑名单**（`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.config/gh`、`~/.kube`、`~/.docker`），网络默认关闭。Seatbelt 规则按「先 deny 后 allow」顺序生效；Linux 侧由无特权 re-exec 包装在自身进程落地只读/写路径规则及祖先目录只读穿透语义。
 
 ```jsonc
 {
@@ -1569,7 +1566,9 @@ shell 命令。默认**写白名单**（工作目录）+ **读黑名单**（`~/.
 }
 ```
 
-沙箱不可用时（非 macOS 或没有 `sandbox-exec`）工具输出会明确标注
+插件还可在 `plugin.json` 中通过 `sandbox` 字段声明独立策略（`write_paths`、`deny_read_paths`、`allow_network`），与宿主全局配置按最小权限取交集（插件只能收紧、不能提权；`write_paths` 会做路径边界校验防止越界）。
+
+沙箱不可用时（如不支持的平台、缺少 `sandbox-exec` 或 Linux 内核不支持 Landlock）工具输出会明确标注
 `[no sandbox available: the command ran unrestricted]`，不会假装受控。
 
 ## 遥测契约
@@ -1807,7 +1806,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 - **协议 schema 版本化与多语言 SDK**（[sdk/schemas/](sdk/schemas/)、[sdk/go/](sdk/go/)、[sdk/python/](sdk/python/)、[sdk/typescript/](sdk/typescript/)）：为 RPC、JSON 输出流与进程扩展 JSON-RPC 统一引入 `schema_version: "1.0"`（省略版本号的存量客户端/扩展向后兼容，不兼容主版本如 `2.0` 前置拒绝）；沉淀机器可读的 JSON Schema 并由 `sdk/schemas/schema_test.go` 与协议常量交叉校验；同时交付零外部依赖的 **Go / Python / TypeScript** 三套 SDK，每套均覆盖「驱动 `harness -rpc`（严格 LF-only 分帧、等待 `agent_settled`、多模态图片输入）」与「编写外部进程扩展（工具、斜杠命令、`event.consult` 反向拦截与事件推送）」，并在 CI 中运行真实二进制黑盒契约测试
 - **多模态图片输入闭环**（[llm/image.go](llm/image.go)、[session/blobs.go](session/blobs.go)、[contextmgr/](contextmgr/)、[tools/fs.go](tools/fs.go)、[mcp/](mcp/)、[cmd/harness/images.go](cmd/harness/images.go)）：支持 PNG / JPEG / WebP / GIF（10 MiB 上限、魔数校验与分辨率解析），打通 OpenAI / Anthropic / Gemini 三家编码；会话按 SHA-256 存进 `<session_dir>/blobs/`（目录 `0700`、文件 `0600`），JSONL 不嵌 base64；`contextmgr` 按分辨率估算图片 token，压缩时将旧图降级为 `[image: ...]` 占位符同时保留近期图片；`read` 工具与 MCP tool/resource 原生回传图片；支持 CLI `-image`、REPL/TUI `@path` 与 RPC `prompt.images`，并在模型目录声明纯文本时前置拦截
-- **插件进程沙箱**（[sandbox/sandbox.go](sandbox/sandbox.go)、[ext/supervisor.go](ext/supervisor.go)、[ext/process.go](ext/process.go)）：能力声明管的是协议表面，管不了进程——一个只拿到 `tools` 的插件仍然以同一个用户身份跑，读得到 harness 读得到的一切。`sandbox_plugins` / `-sandbox-plugins` 把插件子进程放进和 bash 工具同一套 Seatbelt 策略：插件目录可写、凭据目录不可读、网络默认拒绝（`sandbox_plugins_network` 单独打开，因为插件要联网和 shell 要 curl 是两种风险）。`sandbox_plugins_require` 让「平台没有沙箱」变成加载失败而不是警告后照跑。`sandbox.Command` 是这一层的入口：它返回一个把任意 argv 包进 `sandbox-exec` 的 `exec.Cmd`，所以需要自己接管 stdin/stdout 的调用方（JSON-RPC 扩展就是）也能用同一套策略。`/plugins` 显示每个被沙箱插件的实际 profile
+- **跨平台插件进程沙箱与按插件最小权限策略**（[sandbox/](sandbox/)、[plugins/plugins.go](plugins/plugins.go)、[ext/supervisor.go](ext/supervisor.go)、[ext/process.go](ext/process.go)）：能力声明管的是协议表面，管不了进程——一个只拿到 `tools` 的插件仍然以同一个用户身份跑，读得到 harness 读得到的一切。`sandbox` 包抽出了可插拔 `Backend` 接口，同时支持 macOS Seatbelt (`sandbox-exec`) 与 Linux 原生无特权 Landlock + seccomp BPF（纯 Go syscall，零第三方依赖）；`sandbox_plugins` / `-sandbox-plugins` 把插件子进程放进同一套沙箱策略，默认插件目录可写、凭据目录不可读、网络拒绝（`sandbox_plugins_network` 单独打开）。`plugin.json` 还支持通过 `sandbox` 字段声明单插件最小权限策略（支持只读 `write_paths: []`、追加 `deny_read_paths` 与受宿主上限约束的 `allow_network`），由宿主取交集并在 `/plugins` 展示实际后端与 profile。`sandbox_plugins_require` 让「平台没有沙箱」变成加载失败而不是警告后照跑。`sandbox.Command` 是这一层的入口：它返回一个把任意 argv 包进当前平台沙箱的 `exec.Cmd`，所以需要自己接管 stdin/stdout 的调用方（JSON-RPC 扩展就是）也能用同一套策略。
 - **工具级重试与运行级预算闸门**（[agent/agent.go](agent/agent.go)、[agent/retry.go](agent/retry.go)、[tools/tools.go](tools/tools.go)）：重试从「只针对模型请求」扩到工具调用。工具用 `Retryable` 声明失败是暂时的、调用幂等，agent 用同一套退避（`base * 2^(attempt-1)`，默认 500ms 起、`tool_max_retries` 默认 1、负数关闭）重跑这次调用，省掉模型自己再发一遍的往返。边界是**只有 `error` 返回才重试**：`Result{IsError:true}` 是工具的答案（命令退出码非零、文件不存在），重跑只会得到同一句话，模型该看到的是它而不是一次重试。进程扩展的 `tool.execute` 传输失败返回 `error`，所以子进程重启后能再试；manifest 的 `"retryable": true` 会搬到注册的工具上。重试前发 `retry` 事件（`e.Data["tool"]` 指明工具），运行被中止时退避立即中断。**预算闸门**给一次运行一个 token 上限：`max_run_tokens` / `-max-run-tokens`，计数是 `input + output + cacheRead + cacheWrite`（缓存命中的 token 也是 provider 处理过的，漏算会让高缓存命中率的运行看起来免费）；检查在每轮之间，所以最多超支一个请求——下一个请求多大只有构造出来才知道。到点后历史保留、`Result.BudgetExceeded` 置位、返回 `ErrBudgetExceeded`，`agent_settled{aborted:false}` 照常发出：按预算停下不是用户中止
 - **可替换的内核层与并行工具调用**（[ext/ext.go](ext/ext.go)、[llm/registry.go](llm/registry.go)、[agent/agent.go](agent/agent.go)）：从「扩展能加东西」走到「扩展能换掉内核的一层」。`api.RegisterProtocol` + `api.RegisterModel` 让一种内核不认识的线上协议像内置的一样路由——注册协议名和 builder，模型声明该协议，`/model` 切过去就由扩展服务；`api.UseContextPolicy` 把内核的预算/自动压缩/artifact 外置变成最内层，扩展注册的策略包在它外面，可以改写输入、改结果或整个接管（不调 `next` 就是不压缩），多策略按注册顺序从外到内，热重载撤销注册所以 `/reload` 不会叠两层；进程扩展补上 `commands` 能力和 `command.execute` 方法，任何语言的插件都能提供斜杠命令，不再只有 Go 扩展可以。工具循环也补了并行：一次助手消息里**连续的只读调用**并行执行（上限 4），有副作用的调用保持串行且顺序不变（写和它后面的读必须看到写的效果），结果按调用顺序而不是完成顺序回填。只读由工具的 `ReadOnly` 声明决定，未知工具按有副作用处理；并行也让工具通知、TUI 流式标志和示例扩展的计数器变成多 goroutine 共享，三处都加了锁，权限层则改成一次只问一个问题。委托出去的子代理沿用父代理的上下文策略——否则一条注入项目规则或替换压缩的策略会在一层之下悄悄失效
 - **委派子代理与独立上下文**（[orchestrator/](orchestrator/)、[cmd/harness/subagents.go](cmd/harness/subagents.go)、[docs/subagents.md](docs/subagents.md)）：父模型用 `agent` 工具启动后台任务，每个任务拥有独立 session、上下文预算、摘要器、artifact 目录和工作区绑定工具；父上下文只收有界摘要，完整转录留在子会话。默认在 Git 仓库内创建 detached worktree，非 Git 目录回退 shared；成功 worktree 保留，需要人工检查或合入，不会自动丢弃用户改动。`max_concurrent` / `max_depth` / 单次超时 / 取消级联 / 原子 JSON 任务记录均已落地；重启将未完成任务标记为 `interrupted` 而不假装续跑。权限层按子代理 workspace 解析路径，后台无法弹父终端，未预批准的 ask 调用 fail-closed。REPL `/agents` 和 RPC `get_agents` / `get_agent` / `cancel_agent` 提供检查与控制
@@ -1843,7 +1842,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 尚未做的深化项（按优先级）：
 
-- **真正的隔离（后续）**：`sandbox_plugins` 已经把插件子进程关进 macOS Seatbelt，但那是进程边界不是容器，也不按插件区分策略。下一步是 Linux（landlock / seccomp）、按插件声明自己的 profile，以及 WASM 插件这类真正换掉执行环境的路子。上面那三层可替换的内核层要的是 Go 值，跨进程的扩展拿不到，所以隔离只能靠限制子进程本身，而不是接口化。
+- **更强的运行环境隔离（后续）**：目前 macOS（Seatbelt）与 Linux（Landlock + seccomp）进程边界以及按插件 `plugin.json` 最小权限策略均已落地，后续可按需接入外部 `sandbox.Backend`（如容器运行时）或 WASM 插件这类彻底替换执行环境的方案。上面那三层可替换的内核层要的是 Go 值，跨进程的扩展拿不到，所以隔离只能靠限制子进程本身或替换执行环境。
 
 ## License
 

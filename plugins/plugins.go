@@ -20,6 +20,7 @@ import (
 
 	"github.com/NanQiaoMi/auto-harness/envsubst"
 	"github.com/NanQiaoMi/auto-harness/ext"
+	"github.com/NanQiaoMi/auto-harness/sandbox"
 )
 
 // ManifestFile is the descriptor every directory plugin carries.
@@ -40,6 +41,17 @@ type Manifest struct {
 	Capabilities  []string          `json:"capabilities,omitempty"`
 	Consults      []string          `json:"consults,omitempty"`
 	Supervisor    *SupervisorConfig `json:"supervisor,omitempty"`
+	Sandbox       *SandboxConfig    `json:"sandbox,omitempty"`
+}
+
+// SandboxConfig declares optional per-plugin OS sandbox constraints.
+// When present, it is intersected with host settings so a plugin can
+// narrow its own write paths or disable network access and add read
+// denials, without ever escalating above host restrictions.
+type SandboxConfig struct {
+	WritePaths    []string `json:"write_paths,omitempty"`
+	DenyReadPaths []string `json:"deny_read_paths,omitempty"`
+	AllowNetwork  *bool    `json:"allow_network,omitempty"`
 }
 
 // SupervisorConfig controls process-level recovery after a plugin
@@ -183,6 +195,9 @@ func ParseManifest(data []byte) (Manifest, error) {
 	if err := validateSupervisor(m.Supervisor); err != nil {
 		return Manifest{}, err
 	}
+	if err := validateSandboxConfig(m.Sandbox); err != nil {
+		return Manifest{}, err
+	}
 	return m, nil
 }
 
@@ -193,6 +208,29 @@ var (
 	maxPluginRestarts  = 100
 	maxPluginBackoffMS = 60_000
 )
+
+func validateSandboxConfig(s *SandboxConfig) error {
+	if s == nil {
+		return nil
+	}
+	for i, p := range s.WritePaths {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("sandbox.write_paths[%d] must not be empty", i)
+		}
+		if strings.ContainsRune(p, 0) {
+			return fmt.Errorf("sandbox.write_paths[%d] contains a NUL byte", i)
+		}
+	}
+	for i, p := range s.DenyReadPaths {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("sandbox.deny_read_paths[%d] must not be empty", i)
+		}
+		if strings.ContainsRune(p, 0) {
+			return fmt.Errorf("sandbox.deny_read_paths[%d] contains a NUL byte", i)
+		}
+	}
+	return nil
+}
 
 func validateSupervisor(s *SupervisorConfig) error {
 	if s == nil {
@@ -287,6 +325,22 @@ func validateLaunch(root string, m Manifest, inherited map[string]string) error 
 	for key, value := range m.Env {
 		if _, err := envsubst.Expand(value, lookup); err != nil {
 			return fmt.Errorf("env %s: %w", key, err)
+		}
+	}
+	if m.Sandbox != nil {
+		for i, raw := range m.Sandbox.WritePaths {
+			expanded, err := envsubst.Expand(raw, lookup)
+			if err != nil {
+				return fmt.Errorf("sandbox.write_paths[%d]: %w", i, err)
+			}
+			if _, err := resolveInsideAllowMissing(root, expanded); err != nil {
+				return fmt.Errorf("sandbox.write_paths[%d]: %w", i, err)
+			}
+		}
+		for i, raw := range m.Sandbox.DenyReadPaths {
+			if _, err := envsubst.Expand(raw, lookup); err != nil {
+				return fmt.Errorf("sandbox.deny_read_paths[%d]: %w", i, err)
+			}
 		}
 	}
 	return nil
@@ -399,6 +453,110 @@ func resolveInside(root, value string) (string, error) {
 		return "", fmt.Errorf("%s resolves outside the plugin directory", value)
 	}
 	return realPath, nil
+}
+
+// resolveInsideAllowMissing resolves path relative to root, supporting
+// targets that do not exist yet by resolving the deepest existing
+// ancestor with EvalSymlinks and ensuring the final path stays inside
+// root.
+func resolveInsideAllowMissing(root, value string) (string, error) {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	path := value
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(realRoot, path)
+	}
+	path = filepath.Clean(path)
+
+	cur := path
+	var tail []string
+	for {
+		if realCur, err := filepath.EvalSymlinks(cur); err == nil {
+			finalPath := realCur
+			for i := len(tail) - 1; i >= 0; i-- {
+				finalPath = filepath.Join(finalPath, tail[i])
+			}
+			finalPath = filepath.Clean(finalPath)
+			rel, err := filepath.Rel(realRoot, finalPath)
+			if err != nil {
+				return "", err
+			}
+			if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return "", fmt.Errorf("%s resolves outside the plugin directory", value)
+			}
+			return finalPath, nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("cannot resolve %s", value)
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+// SandboxProfile computes the effective sandbox.Profile for this plugin
+// using least-privilege intersection against hostAllowNetwork.
+func (c Candidate) SandboxProfile(hostAllowNetwork bool, inherited ...map[string]string) (*sandbox.Profile, error) {
+	var inh map[string]string
+	if len(inherited) > 0 {
+		inh = inherited[0]
+	}
+	allowNet := hostAllowNetwork
+	cfg := c.Manifest.Sandbox
+	if cfg != nil && cfg.AllowNetwork != nil {
+		allowNet = allowNet && *cfg.AllowNetwork
+	}
+
+	denyRead := append([]string{}, sandbox.DefaultDenyReadPaths()...)
+	seenDeny := map[string]bool{}
+	for _, p := range denyRead {
+		seenDeny[p] = true
+	}
+
+	var writePaths []string
+	if cfg == nil || cfg.WritePaths == nil {
+		if c.Dir != "" {
+			writePaths = []string{c.Dir}
+		}
+	} else {
+		// Preserve non-nil empty slice when write_paths is [].
+		writePaths = make([]string, 0, len(cfg.WritePaths))
+		lookup := lookupFor(c.Dir, c.Manifest, inh)
+		for i, raw := range cfg.WritePaths {
+			expanded, err := envsubst.Expand(raw, lookup)
+			if err != nil {
+				return nil, fmt.Errorf("plugin %s: sandbox.write_paths[%d]: %w", c.Name(), i, err)
+			}
+			resolved, err := resolveInsideAllowMissing(c.Dir, expanded)
+			if err != nil {
+				return nil, fmt.Errorf("plugin %s: sandbox.write_paths[%d]: %w", c.Name(), i, err)
+			}
+			writePaths = append(writePaths, resolved)
+		}
+	}
+
+	if cfg != nil {
+		lookup := lookupFor(c.Dir, c.Manifest, inh)
+		for i, raw := range cfg.DenyReadPaths {
+			expanded, err := envsubst.Expand(raw, lookup)
+			if err != nil {
+				return nil, fmt.Errorf("plugin %s: sandbox.deny_read_paths[%d]: %w", c.Name(), i, err)
+			}
+			if !seenDeny[expanded] {
+				seenDeny[expanded] = true
+				denyRead = append(denyRead, expanded)
+			}
+		}
+	}
+
+	return &sandbox.Profile{
+		WritePaths:    writePaths,
+		DenyReadPaths: denyRead,
+		AllowNetwork:  allowNet,
+	}, nil
 }
 
 func pathLike(command string) bool {

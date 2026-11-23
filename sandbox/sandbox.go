@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -76,13 +75,10 @@ func DefaultDenyReadPaths() []string {
 	return paths
 }
 
-// Available reports whether the platform supports sandboxing.
+// Available reports whether the active backend supports sandboxing on
+// this platform.
 func Available() bool {
-	if runtime.GOOS != "darwin" {
-		return false
-	}
-	_, err := exec.LookPath("sandbox-exec")
-	return err == nil
+	return DefaultBackend().Available()
 }
 
 // Exec runs a command inside the sandbox.
@@ -90,20 +86,12 @@ func Available() bool {
 // On a platform without sandbox support the command runs unchanged and
 // the returned string says so, so the caller can surface the gap.
 func Exec(ctx context.Context, command string, profile Profile, workdir string) (output string, sandboxed bool, err error) {
-	if !Available() {
-		out, runErr := runCommand(ctx, command, workdir)
-		return out, false, runErr
-	}
-	policy, err := policyFor(profile)
+	cmd, sandboxed, err := Command(ctx, "/bin/bash", []string{"-c", command}, &profile, workdir)
 	if err != nil {
 		return "", false, err
 	}
-	cmd := exec.CommandContext(ctx, "sandbox-exec", "-p", policy, "/bin/bash", "-c", command)
-	if workdir != "" {
-		cmd.Dir = workdir
-	}
 	out, err := outputOf(ctx, cmd)
-	return string(out), true, err
+	return string(out), sandboxed, err
 }
 
 // Command builds an exec.Cmd that runs name with args inside the
@@ -119,29 +107,12 @@ func Exec(ctx context.Context, command string, profile Profile, workdir string) 
 // sandboxed is false. A caller that was asked to confine something must
 // treat that as a failure rather than quietly running it unconfined.
 func Command(ctx context.Context, name string, args []string, profile *Profile, workdir string) (*exec.Cmd, bool, error) {
-	if profile == nil || !Available() {
+	if profile == nil {
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.Dir = workdir
 		return cmd, false, nil
 	}
-	policy, err := policyFor(*profile)
-	if err != nil {
-		return nil, false, err
-	}
-	argv := append([]string{"-p", policy, name}, args...)
-	cmd := exec.CommandContext(ctx, "sandbox-exec", argv...)
-	cmd.Dir = workdir
-	return cmd, true, nil
-}
-
-// runCommand runs a command without sandboxing.
-func runCommand(ctx context.Context, command, workdir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", command)
-	if workdir != "" {
-		cmd.Dir = workdir
-	}
-	out, err := outputOf(ctx, cmd)
-	return string(out), err
+	return DefaultBackend().Command(ctx, name, args, profile, workdir)
 }
 
 // pipeGrace bounds how long the output pipes may stay open after the
@@ -159,44 +130,6 @@ const pipeGrace = 5 * time.Second
 func outputOf(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
 	cmd.WaitDelay = pipeGrace
 	return cmd.CombinedOutput()
-}
-
-// policyFor builds a Seatbelt policy for the profile.
-//
-// Seatbelt evaluates the rules in order and the last match wins, so the
-// denials come first and the blanket allow comes last.
-func policyFor(p Profile) (string, error) {
-	var b strings.Builder
-	b.WriteString("(version 1)\n")
-
-	if !p.AllowNetwork {
-		b.WriteString("(deny network*)\n")
-	}
-	if p.DenyProcessExec {
-		b.WriteString("(deny process-exec*)\n")
-	}
-
-	// Reads: deny the sensitive paths, then allow everything else.
-	for _, path := range p.DenyReadPaths {
-		resolved, err := resolve(path)
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(&b, "(deny file-read* (subpath %q))\n", resolved)
-	}
-
-	// Writes: denied everywhere, then allowed for the listed paths.
-	b.WriteString("(deny file-write*)\n")
-	for _, path := range p.WritePaths {
-		resolved, err := resolve(path)
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(&b, "(allow file-write* (subpath %q))\n", resolved)
-	}
-
-	b.WriteString("(allow default)\n")
-	return b.String(), nil
 }
 
 // resolve turns a path into the canonical form Seatbelt needs.
