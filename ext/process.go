@@ -480,7 +480,9 @@ func (e *ProcessExtension) sandboxProfile() *sandbox.Profile {
 	if len(p.DenyReadPaths) == 0 {
 		p.DenyReadPaths = sandbox.DefaultDenyReadPaths()
 	}
-	if len(p.WritePaths) == 0 && e.Dir != "" {
+	// Preserve an explicitly empty slice (read-only plugin) while
+	// defaulting nil to the plugin directory.
+	if p.WritePaths == nil && e.Dir != "" {
 		p.WritePaths = []string{e.Dir}
 	}
 	return &p

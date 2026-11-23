@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NanQiaoMi/auto-harness/sandbox"
 )
 
 func writePlugin(t *testing.T, root, name, manifest string) string {
@@ -260,5 +262,100 @@ func TestLegacyExtensionKeepsWorkingCwd(t *testing.T) {
 	}
 	if extension.Dir != "" {
 		t.Fatalf("legacy Dir = %q, want inherited cwd", extension.Dir)
+	}
+}
+
+func TestManifestSandboxConfigAndLeastPrivilege(t *testing.T) {
+	root := t.TempDir()
+	writePlugin(t, root, "scoped", `{
+	  "schema_version": 1,
+	  "name": "scoped",
+	  "version": "1.0.0",
+	  "command": ["python3", "plugin.py"],
+	  "sandbox": {
+	    "write_paths": ["cache"],
+	    "deny_read_paths": ["/etc/shadow"],
+	    "allow_network": true
+	  }
+	}`)
+	c, err := Load(filepath.Join(root, "scoped"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Host denies network -> plugin requesting allow_network=true stays false.
+	prof, err := c.SandboxProfile(false)
+	if err != nil {
+		t.Fatalf("SandboxProfile(false): %v", err)
+	}
+	if prof.AllowNetwork {
+		t.Error("plugin escalated allow_network over host deny")
+	}
+	if len(prof.WritePaths) != 1 || prof.WritePaths[0] != filepath.Join(c.Dir, "cache") {
+		t.Errorf("WritePaths = %v", prof.WritePaths)
+	}
+	if !contains(prof.DenyReadPaths, "/etc/shadow") {
+		t.Errorf("missing custom deny_read_paths: %v", prof.DenyReadPaths)
+	}
+	for _, def := range sandbox.DefaultDenyReadPaths() {
+		if !contains(prof.DenyReadPaths, def) {
+			t.Errorf("missing host default deny_read_path %q", def)
+		}
+	}
+
+	// Read-only write_paths: [] stays empty slice (not replaced with plugin dir).
+	writePlugin(t, root, "readonly", `{
+	  "schema_version": 1,
+	  "name": "readonly",
+	  "version": "1.0.0",
+	  "command": ["python3", "plugin.py"],
+	  "sandbox": {
+	    "write_paths": [],
+	    "allow_network": false
+	  }
+	}`)
+	ro, err := Load(filepath.Join(root, "readonly"))
+	if err != nil {
+		t.Fatalf("Load readonly: %v", err)
+	}
+	roProf, err := ro.SandboxProfile(true)
+	if err != nil {
+		t.Fatalf("SandboxProfile readonly: %v", err)
+	}
+	if roProf.WritePaths == nil || len(roProf.WritePaths) != 0 {
+		t.Errorf("readonly WritePaths = %#v, want non-nil empty slice", roProf.WritePaths)
+	}
+	if roProf.AllowNetwork {
+		t.Error("plugin setting allow_network=false must tighten host true")
+	}
+}
+
+func TestManifestSandboxRejectsEscapeAndSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	writePlugin(t, root, "dotdot", `{
+	  "schema_version": 1,
+	  "name": "dotdot",
+	  "version": "1.0.0",
+	  "command": ["python3", "plugin.py"],
+	  "sandbox": {"write_paths": ["../outside"]}
+	}`)
+	if _, err := Load(filepath.Join(root, "dotdot")); err == nil {
+		t.Error("expected error for ../ write_paths escape")
+	}
+
+	dir := writePlugin(t, root, "symlink", `{
+	  "schema_version": 1,
+	  "name": "symlink",
+	  "version": "1.0.0",
+	  "command": ["python3", "plugin.py"],
+	  "sandbox": {"write_paths": ["link/sub"]}
+	}`)
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil {
+		t.Error("expected error for symlink write_paths escape")
 	}
 }

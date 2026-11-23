@@ -207,11 +207,29 @@ func (l *extensionLoader) build() []ext.Extension {
 // extension_command one: a sandbox the user asked for that covers only
 // some plugins is worse than none, because it reads like coverage.
 func (l *extensionLoader) confine(pe *ext.ProcessExtension) {
-	if !l.sandboxPlugins || pe == nil {
-		return
+	l.confineCandidate(pe, nil)
+}
+
+func (l *extensionLoader) confineCandidate(pe *ext.ProcessExtension, candidate *plugins.Candidate) error {
+	if pe == nil {
+		return nil
+	}
+	hasPolicy := candidate != nil && candidate.Manifest.Sandbox != nil
+	if !l.sandboxPlugins && !hasPolicy {
+		return nil
+	}
+	if hasPolicy {
+		profile, err := candidate.SandboxProfile(l.sandboxNetwork, l.pluginEnv)
+		if err != nil {
+			return err
+		}
+		pe.Sandbox = profile
+		pe.RequireSandbox = l.requireSandbox
+		return nil
 	}
 	pe.Sandbox = &sandbox.Profile{AllowNetwork: l.sandboxNetwork}
 	pe.RequireSandbox = l.requireSandbox
+	return nil
 }
 
 // processExtensions discovers and wraps process plugins from dirs.
@@ -236,13 +254,15 @@ func (l *extensionLoader) processExtensions(dirs []string) []ext.Extension {
 		}
 		l.selectedPlugins[candidate.Name()] = true
 		extension, err := candidate.Extension(l.pluginEnv)
+		if err == nil {
+			err = l.confineCandidate(extension, &candidate)
+		}
 		record.Extension = extension
 		record.Err = err
 		if err != nil {
 			l.diagnostics = append(l.diagnostics, err)
 			fmt.Fprintf(os.Stderr, "[warn] %v\n", err)
 		} else {
-			l.confine(extension)
 			exts = append(exts, extension)
 		}
 		l.pluginRecords = append(l.pluginRecords, record)
@@ -359,9 +379,9 @@ func (l *extensionLoader) report(manager *ext.Manager) {
 		}
 		if record.Extension != nil && record.Extension.Sandboxed() {
 			if sandbox.Available() {
-				fmt.Printf("  sandbox: %s\n", record.Extension.SandboxProfile().Describe())
+				fmt.Printf("  sandbox (%s): %s\n", sandbox.BackendName(), record.Extension.SandboxProfile().Describe())
 			} else {
-				fmt.Println("  sandbox: requested, but this platform has none")
+				fmt.Printf("  sandbox (%s): requested, but this platform has none\n", sandbox.BackendName())
 			}
 		}
 		if status.Mode != "" {
