@@ -64,6 +64,9 @@ func main() {
 		pluginUntrust    = flag.String("plugin-untrust", "", "remove trust for one plugin publisher")
 		pluginTrustList  = flag.Bool("plugin-trust-list", false, "list trusted plugin publishers and keys")
 		pluginUnsigned   = flag.Bool("plugin-allow-unsigned", false, "allow an unsigned remote plugin registry")
+		pluginInit       = flag.String("plugin-init", "", "scaffold a new plugin directory: <name>")
+		pluginLang       = flag.String("plugin-lang", "python", "language template for -plugin-init: go, python, or typescript")
+		pluginDir        = flag.String("plugin-dir", "", "output directory for -plugin-init (defaults to ./<name>)")
 		noGitCheckpoints = flag.Bool("no-git-checkpoints", false, "disable automatic workspace checkpoints")
 		checkpointLimit  = flag.Int("checkpoint-limit", gitkit.DefaultCheckpointLimit, "maximum retained workspace checkpoints")
 		noSubagents      = flag.Bool("no-subagents", false, "disable delegated background agents")
@@ -112,6 +115,9 @@ func main() {
 		Untrust:       *pluginUntrust,
 		TrustList:     *pluginTrustList,
 		AllowUnsigned: *pluginUnsigned,
+		Init:          *pluginInit,
+		Lang:          *pluginLang,
+		Dir:           *pluginDir,
 	}); handled {
 		if err != nil {
 			fatal(err)

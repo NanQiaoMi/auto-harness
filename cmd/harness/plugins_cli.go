@@ -18,6 +18,9 @@ type pluginCommandOptions struct {
 	Untrust       string
 	TrustList     bool
 	AllowUnsigned bool
+	Init          string
+	Lang          string
+	Dir           string
 }
 
 // runPluginCommand handles the standalone plugin-management actions
@@ -32,6 +35,7 @@ func runPluginCommand(options pluginCommandOptions) (bool, int, error) {
 		strings.TrimSpace(options.Trust) != "",
 		strings.TrimSpace(options.Untrust) != "",
 		options.TrustList,
+		strings.TrimSpace(options.Init) != "",
 	} {
 		if active {
 			actions++
@@ -173,6 +177,20 @@ func runPluginCommand(options pluginCommandOptions) (bool, int, error) {
 				fmt.Printf("  %s\n", keyID)
 			}
 		}
+	case strings.TrimSpace(options.Init) != "":
+		res, err := plugins.Scaffold(plugins.ScaffoldOptions{
+			Name: options.Init,
+			Lang: options.Lang,
+			Dir:  options.Dir,
+		})
+		if err != nil {
+			return true, 1, err
+		}
+		fmt.Printf("scaffolded %s plugin in %s\n", res.Lang, res.Dir)
+		for _, file := range res.Files {
+			fmt.Printf("  %s\n", file)
+		}
+		fmt.Printf("next: harness -plugin-dirs %s\n", res.Dir)
 	}
 	return true, 0, nil
 }
