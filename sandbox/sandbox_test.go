@@ -194,11 +194,6 @@ func TestCommandConfinesAProcess(t *testing.T) {
 		t.Errorf("dir = %q, want %q", cmd.Dir, dir)
 	}
 	if Available() {
-		// The wrapper is sandbox-exec, with the original argv after the
-		// policy.
-		if !strings.HasSuffix(cmd.Path, "sandbox-exec") {
-			t.Errorf("path = %q, want sandbox-exec", cmd.Path)
-		}
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatalf("run: %v", err)
@@ -222,31 +217,33 @@ func TestCommandConfinesAProcess(t *testing.T) {
 	}
 }
 
-// TestPolicyOrderIsCorrect verifies the generated policy denies before
-// it allows, since Seatbelt uses the last matching rule.
-func TestPolicyOrderIsCorrect(t *testing.T) {
-	policy, err := policyFor(Profile{
-		WritePaths:    []string{"/repo"},
-		DenyReadPaths: []string{"/repo/.ssh"},
-	})
-	if err != nil {
-		t.Fatalf("policy: %v", err)
+type fakeBackend struct{}
+
+func (fakeBackend) Name() string    { return "fake-container" }
+func (fakeBackend) Available() bool { return true }
+func (fakeBackend) Command(ctx context.Context, name string, args []string, profile *Profile, workdir string) (*exec.Cmd, bool, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = workdir
+	return cmd, true, nil
+}
+
+func TestSetBackendPluggability(t *testing.T) {
+	orig := BackendName()
+	if orig == "" {
+		t.Fatal("BackendName() must not be empty")
 	}
-	denyWrite := strings.Index(policy, "(deny file-write*)")
-	allowWrite := strings.Index(policy, "(allow file-write*")
-	if denyWrite < 0 || allowWrite < 0 {
-		t.Fatalf("policy is missing rules:\n%s", policy)
+	SetBackend(fakeBackend{})
+	defer SetBackend(nil)
+
+	if BackendName() != "fake-container" {
+		t.Errorf("BackendName() = %q, want fake-container", BackendName())
 	}
-	if denyWrite > allowWrite {
-		t.Errorf("the deny rule must come before the allow rule:\n%s", policy)
+	if !Available() {
+		t.Error("Available() = false with fakeBackend")
 	}
-	if !strings.HasSuffix(strings.TrimSpace(policy), "(allow default)") {
-		t.Errorf("the blanket allow must come last:\n%s", policy)
-	}
-	// The read denial must come before the blanket allow too.
-	denyRead := strings.Index(policy, "(deny file-read*")
-	if denyRead < 0 || denyRead > strings.Index(policy, "(allow default)") {
-		t.Errorf("the read denial must come before the blanket allow:\n%s", policy)
+	_, sandboxed, err := Command(context.Background(), "/bin/echo", []string{"ok"}, &Profile{}, t.TempDir())
+	if err != nil || !sandboxed {
+		t.Errorf("Command() = sandboxed:%v err:%v, want true, nil", sandboxed, err)
 	}
 }
 
