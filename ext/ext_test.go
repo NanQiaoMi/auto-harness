@@ -242,3 +242,16 @@ func TestManagerLoadAndShutdown(t *testing.T) {
 		t.Error("load after shutdown must fail")
 	}
 }
+
+func TestValidateSchemaVersion(t *testing.T) {
+	for _, ok := range []string{"", "1", "1.0", "1.2"} {
+		if err := ValidateSchemaVersion(ok); err != nil {
+			t.Errorf("ValidateSchemaVersion(%q) unexpected err: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"2", "2.0", "v1"} {
+		if err := ValidateSchemaVersion(bad); err == nil {
+			t.Errorf("ValidateSchemaVersion(%q) expected error", bad)
+		}
+	}
+}

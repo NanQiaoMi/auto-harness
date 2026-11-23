@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-harness.local/schemas/extension.v1.schema.json",
+  "title": "auto-harness Extension Process Protocol v1.0",
+  "type": "object",
+  "x-schema-version": "1.0",
+  "required": [],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "id": { "type": "integer" },
+    "method": {
+      "type": "string",
+      "enum": [
+        "manifest",
+        "tool.execute",
+        "command.execute",
+        "shutdown",
+        "event",
+        "event.consult"
+      ]
+    },
+    "params": {},
+    "result": {},
+    "error": {
+      "type": "object",
+      "required": ["message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "Manifest": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "description"],
+            "properties": {
+              "name": { "type": "string" },
+              "label": { "type": "string" },
+              "description": { "type": "string" },
+              "parameters": { "type": "object" },
+              "retryable": { "type": "boolean" }
+            }
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": "string" }
+            }
+          }
+        },
+        "consults": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "ToolResult": {
+      "type": "object",
+      "required": ["content"],
+      "properties": {
+        "content": { "type": "string" },
+        "is_error": { "type": "boolean" }
+      }
+    },
+    "ConsultResult": {
+      "type": "object",
+      "properties": {
+        "block": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "cancel": { "type": "boolean" },
+        "text": { "type": "string" }
+      }
+    }
+  }
+}

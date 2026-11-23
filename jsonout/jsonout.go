@@ -28,6 +28,10 @@ import (
 	"github.com/NanQiaoMi/auto-harness/session"
 )
 
+// SchemaVersion is the wire schema version emitted on every JSONL
+// header and event record.
+const SchemaVersion = "1.0"
+
 // The event types the stream carries.
 //
 // They are the harness's own event names, so a consumer that knows
@@ -77,6 +81,8 @@ const (
 // It is the session's identity: a consumer that writes the events to
 // a file can find the session again from the header alone.
 type Header struct {
+	// SchemaVersion identifies the stream schema revision.
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// Type is always "session".
 	Type string `json:"type"`
 	// Version is the session file's format version.
@@ -97,6 +103,8 @@ type Header struct {
 // The fields are flat rather than nested: a consumer reads the event
 // it knows and ignores the rest.
 type Record struct {
+	// SchemaVersion identifies the stream schema revision.
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// Type names the event.
 	Type string `json:"type"`
 	// Text is the delta of a message_update.
@@ -195,10 +203,11 @@ func (w *Writer) WriteHeader(sess *session.Session, cwd string) error {
 		return fmt.Errorf("jsonout: there is no session")
 	}
 	header := Header{
-		Type:    EventSessionHeader,
-		ID:      sess.Meta.ID,
-		Version: session.VersionTree,
-		CWD:     cwd,
+		SchemaVersion: SchemaVersion,
+		Type:          EventSessionHeader,
+		ID:            sess.Meta.ID,
+		Version:       session.VersionTree,
+		CWD:           cwd,
 	}
 	if !sess.Meta.CreatedAt.IsZero() {
 		header.Timestamp = sess.Meta.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -208,6 +217,9 @@ func (w *Writer) WriteHeader(sess *session.Session, cwd string) error {
 
 // Write writes one record.
 func (w *Writer) Write(record Record) error {
+	if record.SchemaVersion == "" {
+		record.SchemaVersion = SchemaVersion
+	}
 	return w.write(record)
 }
 
@@ -280,7 +292,7 @@ func (w *Writer) eventTypes() []ext.EventType {
 
 // emit writes one harness event to the stream.
 func (w *Writer) emit(e *ext.Event) {
-	record := Record{Type: string(e.Type)}
+	record := Record{SchemaVersion: SchemaVersion, Type: string(e.Type)}
 
 	switch e.Type {
 	case ext.EventMessageUpdate:
@@ -349,7 +361,7 @@ func (w *Writer) emit(e *ext.Event) {
 // The run is over: nothing automatic is left to do. A consumer that
 // wants to know when to stop reading waits for this one.
 func (w *Writer) WriteSettled(aborted bool) error {
-	return w.write(Record{Type: EventAgentSettled, Aborted: aborted})
+	return w.write(Record{SchemaVersion: SchemaVersion, Type: EventAgentSettled, Aborted: aborted})
 }
 
 // convertMessage turns a harness message into the wire shape.

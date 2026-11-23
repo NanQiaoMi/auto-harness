@@ -1793,9 +1793,10 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 ### CI
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) 跑两个 job：
+[.github/workflows/ci.yml](.github/workflows/ci.yml) 跑三个 job：
 
 - **build**：`ubuntu-latest` 和 `macos-latest` 两个平台上跑 `go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`，外加一个 gofmt 检查。工具链跟着 `go.mod` 走（`go-version-file: go.mod`），所以 CI 用的版本就是模块声明的那个。Linux 能跑是因为终端代码按平台拆开了：`tui/term_bsd.go` 用 BSD 的 termios 布局，`tui/term_linux.go` 用 Linux 的（控制字符在前，标志位在后，顺序相反）。**tag 上也会跑**（`tags: ["v*"]`）。
+- **sdk-contract**：编译真实 `harness` 与 `mockllm` 二进制，分别跑 Python 与 TypeScript SDK 的跨语言黑盒契约测试（覆盖 RPC 文本/多模态问答与进程扩展工具/命令/`event.consult`）。
 - **e2e**：真实模型的端到端测试。key 从仓库 secret `OPENCODE_API_KEY` 读，**没有 key 时这一步跳过而不是失败**（`if: env.OPENCODE_API_KEY != ''`）——所以公开仓库克隆下来也不会红。模型固定 `deepseek-v4.1-flash`，和测试源码里写死的一致。
 
 ## Roadmap（深度拓展方向）
@@ -1804,6 +1805,7 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 
 已完成的深化项：
 
+- **协议 schema 版本化与多语言 SDK**（[sdk/schemas/](sdk/schemas/)、[sdk/go/](sdk/go/)、[sdk/python/](sdk/python/)、[sdk/typescript/](sdk/typescript/)）：为 RPC、JSON 输出流与进程扩展 JSON-RPC 统一引入 `schema_version: "1.0"`（省略版本号的存量客户端/扩展向后兼容，不兼容主版本如 `2.0` 前置拒绝）；沉淀机器可读的 JSON Schema 并由 `sdk/schemas/schema_test.go` 与协议常量交叉校验；同时交付零外部依赖的 **Go / Python / TypeScript** 三套 SDK，每套均覆盖「驱动 `harness -rpc`（严格 LF-only 分帧、等待 `agent_settled`、多模态图片输入）」与「编写外部进程扩展（工具、斜杠命令、`event.consult` 反向拦截与事件推送）」，并在 CI 中运行真实二进制黑盒契约测试
 - **多模态图片输入闭环**（[llm/image.go](llm/image.go)、[session/blobs.go](session/blobs.go)、[contextmgr/](contextmgr/)、[tools/fs.go](tools/fs.go)、[mcp/](mcp/)、[cmd/harness/images.go](cmd/harness/images.go)）：支持 PNG / JPEG / WebP / GIF（10 MiB 上限、魔数校验与分辨率解析），打通 OpenAI / Anthropic / Gemini 三家编码；会话按 SHA-256 存进 `<session_dir>/blobs/`（目录 `0700`、文件 `0600`），JSONL 不嵌 base64；`contextmgr` 按分辨率估算图片 token，压缩时将旧图降级为 `[image: ...]` 占位符同时保留近期图片；`read` 工具与 MCP tool/resource 原生回传图片；支持 CLI `-image`、REPL/TUI `@path` 与 RPC `prompt.images`，并在模型目录声明纯文本时前置拦截
 - **插件进程沙箱**（[sandbox/sandbox.go](sandbox/sandbox.go)、[ext/supervisor.go](ext/supervisor.go)、[ext/process.go](ext/process.go)）：能力声明管的是协议表面，管不了进程——一个只拿到 `tools` 的插件仍然以同一个用户身份跑，读得到 harness 读得到的一切。`sandbox_plugins` / `-sandbox-plugins` 把插件子进程放进和 bash 工具同一套 Seatbelt 策略：插件目录可写、凭据目录不可读、网络默认拒绝（`sandbox_plugins_network` 单独打开，因为插件要联网和 shell 要 curl 是两种风险）。`sandbox_plugins_require` 让「平台没有沙箱」变成加载失败而不是警告后照跑。`sandbox.Command` 是这一层的入口：它返回一个把任意 argv 包进 `sandbox-exec` 的 `exec.Cmd`，所以需要自己接管 stdin/stdout 的调用方（JSON-RPC 扩展就是）也能用同一套策略。`/plugins` 显示每个被沙箱插件的实际 profile
 - **工具级重试与运行级预算闸门**（[agent/agent.go](agent/agent.go)、[agent/retry.go](agent/retry.go)、[tools/tools.go](tools/tools.go)）：重试从「只针对模型请求」扩到工具调用。工具用 `Retryable` 声明失败是暂时的、调用幂等，agent 用同一套退避（`base * 2^(attempt-1)`，默认 500ms 起、`tool_max_retries` 默认 1、负数关闭）重跑这次调用，省掉模型自己再发一遍的往返。边界是**只有 `error` 返回才重试**：`Result{IsError:true}` 是工具的答案（命令退出码非零、文件不存在），重跑只会得到同一句话，模型该看到的是它而不是一次重试。进程扩展的 `tool.execute` 传输失败返回 `error`，所以子进程重启后能再试；manifest 的 `"retryable": true` 会搬到注册的工具上。重试前发 `retry` 事件（`e.Data["tool"]` 指明工具），运行被中止时退避立即中断。**预算闸门**给一次运行一个 token 上限：`max_run_tokens` / `-max-run-tokens`，计数是 `input + output + cacheRead + cacheWrite`（缓存命中的 token 也是 provider 处理过的，漏算会让高缓存命中率的运行看起来免费）；检查在每轮之间，所以最多超支一个请求——下一个请求多大只有构造出来才知道。到点后历史保留、`Result.BudgetExceeded` 置位、返回 `ErrBudgetExceeded`，`agent_settled{aborted:false}` 照常发出：按预算停下不是用户中止
@@ -1842,7 +1844,6 @@ SHA-256 与树摘要、升级/卸载事务、lockfile v1→v2 兼容和来源校
 尚未做的深化项（按优先级）：
 
 - **真正的隔离（后续）**：`sandbox_plugins` 已经把插件子进程关进 macOS Seatbelt，但那是进程边界不是容器，也不按插件区分策略。下一步是 Linux（landlock / seccomp）、按插件声明自己的 profile，以及 WASM 插件这类真正换掉执行环境的路子。上面那三层可替换的内核层要的是 Go 值，跨进程的扩展拿不到，所以隔离只能靠限制子进程本身，而不是接口化。
-- **事件 schema 版本化与 SDK**：事件形状写在 `ext/ext.go` 和 README 里，没有版本号也没有别的语言的客户端库——RPC 客户端目前只能照文档手写。
 
 ## License
 

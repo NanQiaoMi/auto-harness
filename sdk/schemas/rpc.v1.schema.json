@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-harness.local/schemas/rpc.v1.schema.json",
+  "title": "auto-harness RPC Wire Protocol v1.0",
+  "type": "object",
+  "x-schema-version": "1.0",
+  "oneOf": [
+    { "$ref": "#/$defs/Command" },
+    { "$ref": "#/$defs/Response" },
+    { "$ref": "#/$defs/Event" }
+  ],
+  "$defs": {
+    "SchemaVersion": {
+      "type": "string",
+      "description": "Wire schema version (e.g. '1.0'). Optional on inbound commands; omitted defaults to '1.0'."
+    },
+    "ImageInput": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "data": { "type": "string", "description": "Base64-encoded image bytes" },
+        "media_type": { "type": "string", "enum": ["image/png", "image/jpeg", "image/webp", "image/gif"] },
+        "label": { "type": "string" }
+      }
+    },
+    "Command": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "abort",
+            "new_session",
+            "get_state",
+            "get_messages",
+            "set_model",
+            "get_available_models",
+            "set_thinking",
+            "compact",
+            "bash",
+            "get_session_stats",
+            "get_context",
+            "get_entries",
+            "get_tree",
+            "get_last_assistant_text",
+            "set_session_name",
+            "get_commands",
+            "get_profile",
+            "get_plugins",
+            "fork",
+            "clone",
+            "get_checkpoints",
+            "create_checkpoint",
+            "rewind_checkpoint",
+            "get_agents",
+            "get_agent",
+            "cancel_agent"
+          ]
+        },
+        "message": { "type": "string" },
+        "images": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ImageInput" }
+        }
+      }
+    },
+    "Response": {
+      "type": "object",
+      "required": ["type", "command", "success"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "id": { "type": "string" },
+        "type": { "const": "response" },
+        "command": { "type": "string" },
+        "success": { "type": "boolean" },
+        "data": {},
+        "error": { "type": "string" }
+      }
+    },
+    "Event": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "type": {
+          "type": "string",
+          "enum": [
+            "agent_start",
+            "agent_end",
+            "agent_before_settle",
+            "agent_settled",
+            "retry",
+            "turn_start",
+            "turn_end",
+            "message_start",
+            "message_update",
+            "message_end",
+            "tool_execution_start",
+            "tool_execution_end",
+            "request_start",
+            "session_before_compact",
+            "session_compact"
+          ]
+        },
+        "data": { "type": "object" }
+      }
+    }
+  }
+}

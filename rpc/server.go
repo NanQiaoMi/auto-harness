@@ -593,10 +593,11 @@ func (s *Server) CurrentSession() *session.Session {
 // getState reports the session's state.
 func (s *Server) getState(command *Command) *Response {
 	state := State{
-		Model:        s.Agent.Config().Model,
-		Thinking:     s.Agent.Config().Thinking,
-		IsStreaming:  s.isStreaming(),
-		MessageCount: len(s.Agent.History()),
+		SchemaVersion: SchemaVersion,
+		Model:         s.Agent.Config().Model,
+		Thinking:      s.Agent.Config().Thinking,
+		IsStreaming:   s.isStreaming(),
+		MessageCount:  len(s.Agent.History()),
 	}
 	if s.Agent.Provider() != nil {
 		state.Provider = s.Agent.Provider().Name()
@@ -853,7 +854,7 @@ func (s *Server) write(record any) {
 
 // emit sends an event to the output stream.
 func (s *Server) emit(data map[string]any) {
-	s.write(Event{Type: eventType(data), Data: data})
+	s.write(Event{SchemaVersion: SchemaVersion, Type: eventType(data), Data: data})
 }
 
 // emitEvent forwards a harness event to the output stream.
@@ -923,7 +924,7 @@ func (s *Server) emitEvent(e *ext.Event) {
 		s.mu.Unlock()
 	}
 
-	s.write(Event{Type: string(e.Type), Data: data})
+	s.write(Event{SchemaVersion: SchemaVersion, Type: string(e.Type), Data: data})
 }
 
 // eventType reads an event's type out of its payload.
@@ -975,6 +976,9 @@ func parseCommand(raw []byte) (*Command, error) {
 	var command Command
 	if err := json.Unmarshal(raw, &command); err != nil {
 		return nil, fmt.Errorf("rpc: parse command: %w", err)
+	}
+	if err := ValidateSchemaVersion(command.SchemaVersion); err != nil {
+		return nil, fmt.Errorf("rpc: %w", err)
 	}
 	if command.Type == "" {
 		return nil, fmt.Errorf("rpc: the command has no type")

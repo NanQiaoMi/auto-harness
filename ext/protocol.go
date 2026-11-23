@@ -5,9 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
+
+// SchemaVersion is the wire protocol version between the harness and
+// external extension processes.
+const SchemaVersion = "1.0"
+
+// ValidateSchemaVersion accepts an empty version (legacy extensions) or
+// any revision in major version 1 ("1" or "1.*").
+func ValidateSchemaVersion(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "1" || strings.HasPrefix(v, "1.") {
+		return nil
+	}
+	return fmt.Errorf("unsupported schema_version %q (supported major version: 1)", v)
+}
 
 // Protocol is the wire protocol between the harness and an external
 // extension process. It is newline-delimited JSON over the child's
@@ -20,6 +35,8 @@ import (
 // The extension may also implement a "manifest" method returning its name
 // and the tools it provides.
 type Protocol struct {
+	// SchemaVersion identifies the wire protocol revision.
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// ID correlates a request with its response.
 	ID int `json:"id,omitempty"`
 	// Method names the operation for requests, or "event" for
@@ -65,6 +82,8 @@ const (
 
 // Manifest describes an extension process.
 type Manifest struct {
+	// SchemaVersion optionally declares the extension protocol version.
+	SchemaVersion string `json:"schema_version,omitempty"`
 	// Name identifies the extension.
 	Name string `json:"name"`
 	// Description is a human-readable summary.
@@ -247,7 +266,7 @@ func (c *rpcConn) callTimeout(method string, params any, result any, timeout tim
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	payload := Protocol{ID: id, Method: method}
+	payload := Protocol{SchemaVersion: SchemaVersion, ID: id, Method: method}
 	if params != nil {
 		b, err := json.Marshal(params)
 		if err != nil {
@@ -300,7 +319,7 @@ func (c *rpcConn) notify(method string, params any) error {
 	if c.closed {
 		return fmt.Errorf("ext: rpc connection closed")
 	}
-	payload := Protocol{Method: method}
+	payload := Protocol{SchemaVersion: SchemaVersion, Method: method}
 	if params != nil {
 		b, err := json.Marshal(params)
 		if err != nil {

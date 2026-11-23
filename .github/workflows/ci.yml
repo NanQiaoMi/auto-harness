@@ -77,3 +77,39 @@ jobs:
         # The model is fixed to deepseek-v4.1-flash in the test source,
         # so the suite stays on the one model it was written for.
         run: go test -tags e2e -timeout 600s ./e2e/ -v
+
+  sdk-contract:
+    name: sdk-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: build binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/harness ./cmd/harness
+          go build -o bin/mockllm ./cmd/mockllm
+
+      - name: python sdk contract tests
+        env:
+          HARNESS_BIN: ${{ github.workspace }}/bin/harness
+          MOCKLLM_BIN: ${{ github.workspace }}/bin/mockllm
+        run: python3 -m unittest discover -s sdk/python/tests -v
+
+      - name: typescript sdk contract tests
+        env:
+          HARNESS_BIN: ${{ github.workspace }}/bin/harness
+          MOCKLLM_BIN: ${{ github.workspace }}/bin/mockllm
+        run: node --experimental-strip-types --test sdk/typescript/test/contract.test.ts
