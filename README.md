@@ -4,7 +4,26 @@
 
 **设计哲学（继承 pi）**：极简内核 + 一切皆扩展。核心只做一件事——把 LLM 补全、工具执行和事件通知跑成一个循环；其余所有能力（UI、统计、压缩、权限……）都通过扩展挂在事件总线上。
 
+## 交互演示
+
+| 交互式 REPL 与工具审批守卫 | 遥测状态、Git 检查点与权限规则 |
+| :---: | :---: |
+| ![auto-harness REPL 与工具审批](docs/images/cli-repl-approval.png) | ![auto-harness 遥测与权限检查](docs/images/cli-commands-telemetry.png) |
+
 ## 架构总览
+
+```mermaid
+flowchart TB
+    Entry["⌨️ 入口与交互层<br/>cmd/harness (REPL / -tui / -rpc / --mode json)"] --> Agent["🔄 核心 Agent 循环<br/>agent (Turn Loop / 重试 / 队列)"]
+    Agent --> LLM["🧠 统一 LLM 层<br/>llm (OpenAI / Anthropic / 流式目录)"]
+    Agent --> Ctx["📦 上下文与会话<br/>contextmgr (预算/摘要) · session (JSONL 树)"]
+    Agent --> Tools["🛠️ 工具与隔离执行<br/>tools (bash/read/write/edit) · gitkit · orchestrator"]
+
+    Tools --> Guard["🛡️ 权限与 OS 沙箱<br/>perm (allow/ask/deny) · sandbox (Seatbelt/Landlock)"]
+    Agent -.->|广播 / event.consult| Bus["🚌 扩展事件总线<br/>ext (进程内 Hook + stdio JSON-RPC 子进程扩展)"]
+    Bus --> Plugins["🧩 插件与协议<br/>plugins · mcp · prompts · skills"]
+    Bus --> Tel["📊 遥测契约与后端<br/>telemetry + telemetryext → OTLP / Prometheus"]
+```
 
 ```
 cmd/harness/          CLI 入口（REPL + one-shot + RPC），UI 只是事件总线的一个消费者
