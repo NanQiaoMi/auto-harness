@@ -4,7 +4,79 @@
 
 **设计哲学（继承 pi）**：极简内核 + 一切皆扩展。核心只做一件事——把 LLM 补全、工具执行和事件通知跑成一个循环；其余所有能力（UI、统计、压缩、权限……）都通过扩展挂在事件总线上。
 
+<details>
+<summary>📑 目录导航（点击展开快速跳转）</summary>
+
+- [交互演示](#交互演示)
+- [架构总览](#架构总览)
+- [快速开始](#快速开始)
+- [扩展开发](#扩展开发)
+- [内置工具](#内置工具)
+- [内置 Git 与逐步回退](#内置-git-与逐步回退)
+- [文件变更队列](#文件变更队列)
+- [Prompt 模板、项目上下文与 Skills](#prompt-模板项目上下文与-skills)
+- [RPC 模式](#rpc-模式rpc)
+- [JSON 输出模式](#json-输出模式jsonout)
+- [MCP 接入](#mcp-接入)
+- [项目信任](#项目信任cmdharnesstrustgo)
+- [权限与沙箱](#权限与沙箱)
+- [遥测契约](#遥测契约)
+- [测试](#测试)
+- [Roadmap](#roadmap深度拓展方向)
+
+</details>
+
+## 交互演示
+
+| 交互式 REPL 与工具审批守卫 | 遥测状态、Git 检查点与权限规则 |
+| :---: | :---: |
+| ![auto-harness REPL 与工具审批](docs/images/cli-repl-approval.png) | ![auto-harness 遥测与权限检查](docs/images/cli-commands-telemetry.png) |
+
 ## 架构总览
+
+```mermaid
+flowchart TB
+    Entry["⌨️ 入口与交互层<br/>cmd/harness (REPL / -tui / -rpc / --mode json)"] --> Agent["🔄 核心 Agent 循环<br/>agent (Turn Loop / 重试 / 队列)"]
+    Agent --> LLM["🧠 统一 LLM 层<br/>llm (OpenAI / Anthropic / 流式目录)"]
+    Agent --> Ctx["📦 上下文与会话<br/>contextmgr (预算/摘要) · session (JSONL 树)"]
+    Agent --> Tools["🛠️ 工具与隔离执行<br/>tools (bash/read/write/edit) · gitkit · orchestrator"]
+
+    Tools --> Guard["🛡️ 权限与 OS 沙箱<br/>perm (allow/ask/deny) · sandbox (Seatbelt/Landlock)"]
+    Agent -.->|广播 / event.consult| Bus["🚌 扩展事件总线<br/>ext (进程内 Hook + stdio JSON-RPC 子进程扩展)"]
+    Bus --> Plugins["🧩 插件与协议<br/>plugins · mcp · prompts · skills"]
+    Bus --> Tel["📊 遥测契约与后端<br/>telemetry + telemetryext → OTLP / Prometheus"]
+```
+
+### 核心 Turn 循环与权限守卫工作流
+
+```mermaid
+sequenceDiagram
+    participant U as 👤 用户 / RPC
+    participant A as 🔄 Agent Loop
+    participant E as 🚌 扩展总线 (ext / perm)
+    participant L as 🧠 LLM Provider
+    participant T as 🛠️ Tools + OS 沙箱
+
+    U->>A: 提交 Prompt / 排队指令
+    A->>E: 触发 input / before_agent_start
+    loop Turn 循环 (直至无 tool_call)
+        A->>L: 发送上下文消息与工具声明
+        L-->>A: 流式返回文本与 tool_call
+        A->>E: 广播 tool_call (含 event.consult 5s 超时)
+        alt perm 拦截或用户拒绝 [y/N]
+            E-->>A: Block=true (fail-closed)
+            A-->>L: 回传工具被拦截原因
+        else 放行通过
+            A->>T: 在文件变更队列与沙箱中执行
+            T-->>A: 返回 tool_result
+            A->>E: 广播 tool_result / turn_end
+        end
+    end
+    A-->>U: 输出最终响应并持久化 JSONL 会话
+```
+
+<details>
+<summary>📁 完整模块目录树与 pi 对照表（点击展开）</summary>
 
 ```
 cmd/harness/          CLI 入口（REPL + one-shot + RPC），UI 只是事件总线的一个消费者
@@ -130,6 +202,8 @@ config/               配置：默认值 < ~/.harness/config.json < 环境变量
 | `pi-coding-agent` Skills   | `skills`                    | SKILL.md 技能库 + 渐进披露 + /skill:name |
 | `pi-coding-agent` RPC 模式 | `rpc`                       | JSONL 命令/响应/事件，被别的程序驱动 |
 | `pi-coding-agent` JSON 模式 | `jsonout`                  | 一次性运行的完整事件流（--mode json） |
+
+</details>
 
 ### 与 pi 的设计差异
 
